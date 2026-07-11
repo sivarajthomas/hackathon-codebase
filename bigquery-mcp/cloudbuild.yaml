@@ -44,6 +44,7 @@ steps:
       - --port=8080
       - --no-allow-unauthenticated
       - --set-env-vars=BIGQUERY_PROJECT=$PROJECT_ID
+      - --service-account=cloud-run-sa@project-00c7b34c-acc0-4431-afb.iam.gserviceaccount.com
 
 options:
   logging: CLOUD_LOGGING_ONLY
