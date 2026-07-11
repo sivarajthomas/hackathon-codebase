@@ -1,4 +1,4 @@
-# BigQuery MCP server for Google Cloud Run.
+# BigQuery MCP server for Google Cloud Run..
 #
 # Runs Google's MCP Toolbox for Databases (pinned to the same version as the
 # local toolbox.exe) over Streamable HTTP, serving the BigQuery sources, tools
