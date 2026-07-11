@@ -18,8 +18,8 @@ substitutions:
   _INVOICE_URL: "https://invoice-mcp-836378136559.us-central1.run.app/mcp"
   _BIGQUERY_URL: "https://bigquery-mcp-836378136559.us-central1.run.app/mcp"
   _ROUTER_MODEL: gemini-2.5-flash
-  _MODEL_SIMPLE: gemini-2.5-flash-lite
-  _MODEL_MODERATE: gemini-2.5-flash
+  _MODEL_SIMPLE: gemini-2.5-pro
+  _MODEL_MODERATE: gemini-2.5-pro
   _MODEL_COMPLEX: gemini-2.5-pro
 
 steps:
