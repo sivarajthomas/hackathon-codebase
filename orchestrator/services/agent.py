@@ -21,7 +21,7 @@ from google.genai import types
 from config import ServerTarget, get_settings
 from genai_client import get_genai_client
 from mcp_gateway import ToolHub
-from schemas import ProofItem
+from schemas import ChatTurn, ProofItem
 
 try:
     from shared.logging import get_logger
@@ -35,16 +35,51 @@ except Exception:  # pragma: no cover
 
 _SYSTEM_INSTRUCTION = """\
 You are an enterprise data assistant. Answer the user's question using ONLY the
-tools provided and the data they return. Follow these rules strictly:
+tools provided and the data they return.
 
-1. Gather evidence by calling the appropriate tools before answering. Prefer
-   listing/among available data to locate the right record when an identifier
-   is not found directly.
-2. Base every statement on tool results. Never invent values, identifiers,
-   totals or percentages. If a value must be derived (e.g. a percentage from an
-   amount), show the calculation and the source figures.
-3. If the tools do not contain the answer, say so plainly and state what is
-   missing — do not guess.
+The user speaks in BUSINESS terms (invoices, shipments, carriers, transport,
+taxes, surcharges, rate cards, revenue, customers). They will almost NEVER give
+you exact dataset, table or column names. It is YOUR job to discover the schema
+and map their words to the real data.
+
+DISCOVER BEFORE YOU QUERY — never guess identifiers:
+1. NEVER invent or assume a dataset, table or column name (do NOT assume names
+   like "default", "invoices", etc.). Guessed identifiers cause "not found"
+   errors and are unacceptable.
+2. First explore the catalog to find the right objects:
+   - Use `list_dataset_ids` to see the available datasets.
+   - Use `search_catalog` with the user's business terms (e.g. "invoice",
+     "surcharge", "carrier", "tax", "shipment") to locate matching tables/views.
+   - Use `list_table_ids` on a dataset and `get_table_info` on candidate tables
+     to read their real column names and types.
+3. Only after you know the real dataset/table/column names should you query.
+   Use fully-qualified names `project_or_dataset.table` exactly as discovered.
+
+COMBINE TABLES WHEN NEEDED for an accurate answer:
+- A complete answer often spans several tables (e.g. invoices + line-item
+  charges + surcharge rates + tax rates + carrier/zone masters). Inspect the
+  candidate tables, identify the join keys (shared ids such as invoice id,
+  shipment id, carrier id, zone id) from their schemas, and write SQL that JOINs
+  them rather than answering from a single table when the question demands more.
+- For counts/aggregations/trends, prefer `execute_sql` with correct GROUP BY /
+  JOIN / date filters after you have confirmed the schema. Use
+  `ask_data_insights` for open-ended analytical questions over known tables and
+  `forecast` for time-series projections.
+
+DOCUMENTS: use the knowledge tools (`knowledge_list_folders`,
+`knowledge_list_files`, `knowledge_read_file`) only for policy/PDF/contract
+documents, never for structured figures.
+
+ANSWERING RULES:
+1. Base every statement on tool results. Never invent values, identifiers,
+   totals or percentages. If a value is derived (e.g. a percentage), show the
+   calculation and the source figures.
+2. If, after genuinely exploring the catalog and schema, the data is not there,
+   say so plainly and state which datasets/tables you checked — do not guess.
+3. Use the earlier conversation turns as memory: resolve follow-up questions
+   ("what about last month?", "and for that carrier?") against what was already
+   asked and answered, and reuse dataset/table names you already discovered
+   instead of rediscovering them.
 4. Respond in clear, concise natural language suitable for a business user.
 """
 
@@ -80,9 +115,15 @@ def _generate(model: str, contents: list[types.Content], tools: list[types.Tool]
     return client.models.generate_content(model=model, contents=contents, config=config)
 
 
-async def answer(question: str, model: str, targets: list[ServerTarget]) -> AgentResult:
+async def answer(
+    question: str,
+    model: str,
+    targets: list[ServerTarget],
+    history: list[ChatTurn] | None = None,
+) -> AgentResult:
     """Run the grounded tool-calling loop and return answer + proof."""
     settings = get_settings()
+    history = history or []
     proof: list[ProofItem] = []
 
     async with ToolHub() as hub:
@@ -103,9 +144,11 @@ async def answer(question: str, model: str, targets: list[ServerTarget]) -> Agen
             )
 
         tools = hub.tools
-        contents: list[types.Content] = [
-            types.Content(role="user", parts=[types.Part(text=question)])
-        ]
+        contents: list[types.Content] = []
+        for turn in history:
+            role = "model" if turn.role == "assistant" else "user"
+            contents.append(types.Content(role=role, parts=[types.Part(text=turn.content)]))
+        contents.append(types.Content(role="user", parts=[types.Part(text=question)]))
 
         final_text = ""
         for _ in range(settings.max_tool_iterations):

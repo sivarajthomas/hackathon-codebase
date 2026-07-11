@@ -80,7 +80,7 @@ async def ask(payload: AskRequest) -> AskResponse:
         )
         decision.servers = chosen or list(targets_by_key)
     else:
-        decision = await router.route(payload.question)
+        decision = await router.route(payload.question, payload.history)
 
     # 2. Select the model by complexity.
     model = settings.model_for(decision.complexity)
@@ -96,7 +96,7 @@ async def ask(payload: AskRequest) -> AskResponse:
             "model": model,
         },
     )
-    result = await agent.answer(payload.question, model, targets)
+    result = await agent.answer(payload.question, model, targets, payload.history)
 
     return AskResponse(
         answer=result.answer,

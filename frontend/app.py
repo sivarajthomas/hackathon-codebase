@@ -73,6 +73,8 @@ async def ask(payload: dict[str, Any]) -> Any:
         raise HTTPException(status_code=400, detail="A non-empty 'question' is required.")
 
     body: dict[str, Any] = {"question": question}
+    if payload.get("history"):
+        body["history"] = payload["history"]
     if payload.get("force_servers"):
         body["force_servers"] = payload["force_servers"]
 

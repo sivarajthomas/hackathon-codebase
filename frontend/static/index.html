@@ -83,6 +83,11 @@
     const input = document.getElementById("q");
     const sendBtn = document.getElementById("send");
 
+    // Conversation memory: prior turns sent to the orchestrator so the
+    // assistant remembers earlier questions and answers.
+    const history = [];
+    const MAX_HISTORY_TURNS = 20;
+
     function el(tag, cls, html) {
       const e = document.createElement(tag);
       if (cls) e.className = cls;
@@ -155,13 +160,16 @@
         const res = await fetch("/api/ask", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question: q }),
+          body: JSON.stringify({ question: q, history: history.slice(-MAX_HISTORY_TURNS) }),
         });
         const data = await res.json().catch(() => ({ detail: "Invalid response." }));
         if (!res.ok) {
           renderError(node, "Error " + res.status + ": " + (data.detail || JSON.stringify(data)));
         } else {
           renderBot(node, data);
+          // Record this turn so the next question carries the context.
+          history.push({ role: "user", content: q });
+          if (data.answer) history.push({ role: "assistant", content: data.answer });
         }
       } catch (e) {
         renderError(node, "Network error: " + e.message);
