@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Root tooling configuration shared by all servers and the shared package.
+
+# NOTE: Each MCP server is an independently deployable unit. They intentionally
+# use local top-level packages (``services``, ``models``, ``repository`` ...),
+# so their test suites MUST run in isolated pytest processes -- one per server.
+# Running them all in a single process would collide these package names.
+# Use ``run_tests.ps1`` (or run ``pytest`` from within each server directory).
+[tool.pytest.ini_options]
+addopts = "-q --import-mode=importlib"
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101"]  # allow asserts in tests
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+disallow_untyped_defs = false
+ignore_missing_imports = true

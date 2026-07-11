@@ -1,0 +1,19 @@
+{
+  "servers": {
+    "bigquery": {
+      "command": "${workspaceFolder}/bigquery-mcp/toolbox.exe",
+      "args": [
+        "--config",
+        "${workspaceFolder}/bigquery-mcp/tools.yaml",
+        "--stdio"
+      ],
+      "env": {
+        "BIGQUERY_PROJECT": "gcp-eds-finance-user-dev",
+        "GOOGLE_APPLICATION_CREDENTIALS": "C:\\Users\\MTY7LMP\\Downloads\\gcp-eds-finance-user-dev-6c83ffcd9e6e.json"
+      }
+    },
+    "invoice": {
+      "url": "http://localhost:8082/mcp"
+    }
+  }
+}

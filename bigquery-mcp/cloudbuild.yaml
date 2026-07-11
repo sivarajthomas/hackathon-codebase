@@ -1,0 +1,51 @@
+# Cloud Build pipeline for the BigQuery MCP server (Google MCP Toolbox).
+#
+# Builds the image (context = bigquery-mcp/, only tools.yaml is needed), pushes
+# it to Artifact Registry, and deploys it to Cloud Run. The Dockerfile downloads
+# the Linux toolbox binary during the build, so toolbox.exe is not needed here.
+#
+# GitHub trigger: set the build config path to "bigquery-mcp/cloudbuild.yaml".
+# Manual run (from the repository root):
+#   gcloud builds submit . --config bigquery-mcp/cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_REPO=mcp-servers
+
+substitutions:
+  _REGION: us-central1
+  _REPO: mcp-servers
+  _SERVICE: bigquery-mcp
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - bigquery-mcp/Dockerfile
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - bigquery-mcp
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - --region=${_REGION}
+      - --platform=managed
+      - --port=8080
+      - --no-allow-unauthenticated
+      - --set-env-vars=BIGQUERY_PROJECT=$PROJECT_ID
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1800s

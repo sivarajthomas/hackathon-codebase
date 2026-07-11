@@ -1,0 +1,5 @@
+# Shared package requirements.
+# Pinned to compatible ranges; each MCP server installs these plus its own deps.
+
+mcp>=1.2.0
+pydantic>=2.6.0

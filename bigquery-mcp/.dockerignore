@@ -1,0 +1,7 @@
+# Keep the BigQuery MCP build context tiny -- only tools.yaml is needed.
+toolbox.exe
+toolbox
+*.md
+.env
+*.env
+.gitignore

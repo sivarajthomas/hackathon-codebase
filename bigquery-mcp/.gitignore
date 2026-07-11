@@ -1,0 +1,6 @@
+# Toolbox binary (large, download per-OS from the releases page)
+toolbox
+toolbox.exe
+
+# Local secrets / env
+.env

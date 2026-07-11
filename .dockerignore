@@ -1,0 +1,16 @@
+# Keep Docker build context small and images clean.
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/tests/
+.venv/
+venv/
+.git/
+.gitignore
+*.md
+.env
+*.env
+
+# Large local-only binary (the BigQuery image downloads its own Linux toolbox)
+**/toolbox
+**/toolbox.exe
