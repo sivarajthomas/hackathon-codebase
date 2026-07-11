@@ -15,8 +15,8 @@ substitutions:
   _REPO: mcp-servers
   _SERVICE: orchestrator
   _VERTEX_LOCATION: us-central1
-  _INVOICE_URL: "https://invoice-mcp-836378136559.us-central1.run.app"
-  _BIGQUERY_URL: "https://bigquery-mcp-836378136559.us-central1.run.app"
+  _INVOICE_URL: "https://invoice-mcp-836378136559.us-central1.run.app/mcp"
+  _BIGQUERY_URL: "https://bigquery-mcp-836378136559.us-central1.run.app/mcp"
   _ROUTER_MODEL: gemini-2.5-flash
   _MODEL_SIMPLE: gemini-2.5-flash-lite
   _MODEL_MODERATE: gemini-2.5-flash

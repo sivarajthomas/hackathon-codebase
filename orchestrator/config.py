@@ -11,10 +11,26 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 
 def _get(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def _mcp_url(name: str) -> str:
+    """Return an MCP endpoint URL, defaulting the path to ``/mcp``.
+
+    Streamable-HTTP MCP servers expose their endpoint at ``/mcp``. If the URL is
+    configured without a path (just the service root), the MCP client would POST
+    to ``/`` and get a 404, so we append ``/mcp`` defensively.
+    """
+    raw = _get(name).rstrip("/")
+    if not raw:
+        return ""
+    if urlsplit(raw).path in ("", "/"):
+        return f"{raw}/mcp"
+    return raw
 
 
 def _get_int(name: str, default: int) -> int:
@@ -60,8 +76,8 @@ class Settings:
     model_complex: str = field(default_factory=lambda: _get("MODEL_COMPLEX", "gemini-2.5-pro"))
 
     # --- MCP servers ---
-    invoice_mcp_url: str = field(default_factory=lambda: _get("INVOICE_MCP_URL"))
-    bigquery_mcp_url: str = field(default_factory=lambda: _get("BIGQUERY_MCP_URL"))
+    invoice_mcp_url: str = field(default_factory=lambda: _mcp_url("INVOICE_MCP_URL"))
+    bigquery_mcp_url: str = field(default_factory=lambda: _mcp_url("BIGQUERY_MCP_URL"))
 
     # --- Behaviour ---
     max_tool_iterations: int = field(default_factory=lambda: _get_int("MAX_TOOL_ITERATIONS", 6))
