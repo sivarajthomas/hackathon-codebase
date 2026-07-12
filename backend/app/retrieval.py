@@ -63,25 +63,15 @@ async def semantic_cache_set(
 async def vector_search(
     question: str, filters: dict[str, Any], settings: Settings
 ) -> list[Citation]:
-    """Contract-aware vector search with metadata filters."""
-    # TODO(placeholder): embed `question`, query settings.vector_index_endpoint
-    #   with metadata restricts derived from `filters`, return top_k matches.
-    return [
-        Citation(
-            source_id="stub-contract-1",
-            source_type="vector",
-            locator=f"{settings.invoice_resource_uri}#clause-4.2",
-            snippet="[PLACEHOLDER] Retrieved contract clause relevant to the question.",
-            score=0.91,
-        ),
-        Citation(
-            source_id="stub-invoice-1",
-            source_type="vector",
-            locator=f"{settings.invoice_resource_uri}#invoice-line-7",
-            snippet="[PLACEHOLDER] Retrieved invoice line item relevant to the question.",
-            score=0.87,
-        ),
-    ]
+    """Contract-aware vector search with metadata filters.
+
+    The vector index is not populated yet, so this returns no candidates. All
+    grounding therefore comes from the live BigQuery dataset and GCS bucket via
+    the MCP tools. Re-enable a real embedding query here once the index is ready.
+    """
+    # TODO: embed `question`, query settings.vector_index_endpoint with metadata
+    #   restricts derived from `filters`, return top_k matches.
+    return []
 
 
 async def rerank(
