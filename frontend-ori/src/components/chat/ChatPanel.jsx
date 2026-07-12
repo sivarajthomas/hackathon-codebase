@@ -6,6 +6,7 @@ import TypingIndicator from './TypingIndicator'
 import SuggestedPrompts from './SuggestedPrompts'
 import AgentIcon from '../ui/AgentIcon'
 import UpsLogo from '../ui/UpsLogo'
+import { useTransition } from '../ui/TransitionProvider'
 import { agents } from '../../data/agents'
 import { sendChatMessage } from '../../lib/api'
 
@@ -57,6 +58,16 @@ export default function ChatPanel({ agent }) {
   // Per-session trace_id awaiting a clarification answer (Simulate round-trip).
   const pendingTrace = useRef({})
 
+  // Prompt-box targets the courier drone flies to. The drone (owned by the
+  // TransitionProvider) writes its instruction here via `setDroneText`.
+  const { registerPrompt } = useTransition()
+  const inputWrapRef = useRef(null)
+  const sendBtnRef = useRef(null)
+  const [droneText, setDroneText] = useState('')
+  // True while the drone is dropping letters — hides the default placeholder
+  // so it doesn't sit behind the incoming bold text.
+  const [droneWriting, setDroneWriting] = useState(false)
+
   const active = sessions.find((s) => s.id === activeId) || sessions[0]
 
   // Reset the workspace when navigating to a different agent.
@@ -67,6 +78,22 @@ export default function ChatPanel({ agent }) {
     setInput('')
     setTyping(false)
     pendingTrace.current = {}
+    // Clear any previously written instruction; the drone rewrites it.
+    setDroneText('')
+    setDroneWriting(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent.slug])
+
+  // Register the prompt box + send button so the incoming drone knows where to
+  // fly and where to drop its letters.
+  useEffect(() => {
+    registerPrompt({
+      inputEl: inputWrapRef.current,
+      sendEl: sendBtnRef.current,
+      setPlaceholder: setDroneText,
+      onWriteStart: () => setDroneWriting(true),
+    })
+    return () => registerPrompt(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.slug])
 
@@ -440,14 +467,22 @@ export default function ChatPanel({ agent }) {
 
         {/* Input */}
         <form onSubmit={onSubmit} className="px-4 pb-6 pt-2 md:px-8">
-          <div className="mx-auto flex max-w-3xl items-center gap-2 rounded-2xl border border-brand-brown/15 bg-white px-3 py-2 shadow-sm transition-colors focus-within:border-brand-gold">
+          <div
+            ref={inputWrapRef}
+            className="mx-auto flex max-w-3xl items-center gap-2 rounded-2xl border border-brand-brown/15 bg-white px-3 py-2 shadow-sm transition-colors focus-within:border-brand-gold"
+          >
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={agent.placeholder || `Message ${agent.name}…`}
-              className="flex-1 bg-transparent px-2 py-2.5 text-sm text-brand-brownDeep placeholder:text-brand-brown/40 focus:outline-none"
+              placeholder={droneText || (droneWriting ? '' : agent.placeholder || `Message ${agent.name}…`)}
+              className={`flex-1 bg-transparent px-2 py-2.5 text-sm text-brand-brownDeep focus:outline-none ${
+                droneText
+                  ? 'placeholder:font-bold placeholder:text-black'
+                  : 'placeholder:text-brand-brown/40'
+              }`}
             />
             <button
+              ref={sendBtnRef}
               type="submit"
               disabled={!input.trim() || typing}
               className="flex h-10 w-10 items-center justify-center rounded-xl text-brand-brownDeep transition-transform hover:scale-105 disabled:opacity-30"
@@ -460,7 +495,7 @@ export default function ChatPanel({ agent }) {
             </button>
           </div>
           <div className="mx-auto mt-2 max-w-3xl text-center text-[10px] text-brand-brown/40">
-            One Invoice Intelligence · responses are simulated for demo purposes
+            AI-generated responses may be inaccurate — please verify important information.
           </div>
         </form>
       </div>

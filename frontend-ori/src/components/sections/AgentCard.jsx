@@ -55,16 +55,16 @@ export default function AgentCard({ agent, index }) {
         }}
         whileHover={{ y: -10 }}
       >
-        {/* Accent glow following the cursor */}
+        {/* Accent glow following the cursor — always on, intensifies on hover */}
         <div
-          className="pointer-events-none absolute inset-0 rounded-3xl opacity-0 transition-opacity duration-300 group-hover:opacity-100"
+          className="pointer-events-none absolute inset-0 rounded-3xl opacity-70 transition-opacity duration-300 group-hover:opacity-100"
           style={{
             background: `radial-gradient(300px circle at ${glow.x}% ${glow.y}%, ${agent.accentSoft}, transparent 65%)`,
           }}
         />
-        {/* Border glow on hover */}
+        {/* Border glow — always on, intensifies on hover */}
         <div
-          className="pointer-events-none absolute -inset-px rounded-3xl opacity-0 transition-opacity duration-500 group-hover:opacity-100"
+          className="pointer-events-none absolute -inset-px rounded-3xl opacity-60 transition-opacity duration-500 group-hover:opacity-100"
           style={{ boxShadow: `0 0 60px -12px ${agent.accent}`, borderRadius: '1.5rem' }}
         />
 

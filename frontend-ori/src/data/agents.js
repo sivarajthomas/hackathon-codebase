@@ -90,11 +90,11 @@ export const agents = [
     tagline: 'Catch errors before they become disputes.',
     description:
       'Proactively identifies potential billing errors and dispute risks before invoices are issued by validating charges, detecting anomalies, and recommending corrective actions.',
-    accent: '#ff8a3d',
-    accentSoft: 'rgba(255,138,61,0.16)',
-    gradient: 'from-orange-400/30 via-orange-600/10 to-transparent',
+    accent: '#ff2fb0',
+    accentSoft: 'rgba(255,47,176,0.16)',
+    gradient: 'from-pink-400/30 via-fuchsia-600/10 to-transparent',
     icon: 'chip',
-    videoPoster: 'linear-gradient(135deg,#2a1606,#3a2008 45%,#1f1004)',
+    videoPoster: 'linear-gradient(135deg,#2a0620,#3a0830 45%,#1f0418)',
     greeting:
       "Prevent Agent scanning. Share an account or billing batch and I'll validate charges, flag anomalies, and recommend corrective actions before issues escalate.",
     placeholder: 'Enter invoice number, date & your query',
