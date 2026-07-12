@@ -1,7 +1,7 @@
 # Production-ready image for the Invoice/Shipment MCP server.
 #
 # Build from the repository root (mcp-platform/):
-#   docker build -f gcs-mcp/Dockerfile -t gcs-mcp .
+#   docker build -f gcs-mcp/Dockerfile -t gcs-mcp .#
 
 FROM python:3.12-slim AS base
 
