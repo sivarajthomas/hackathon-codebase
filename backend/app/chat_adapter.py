@@ -9,6 +9,7 @@ any pipeline business logic.
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Optional
 
 from .orchestrator import Orchestrator
@@ -190,13 +191,39 @@ async def run_chat(orch: Orchestrator, req: ChatRequest) -> ChatResponse:
     verb = _SLUG_TO_VERB.get((req.agent or "").lower())
     invoice = req.invoice_number or _extract_invoice(req.message)
     invoice = invoice or _invoice_from_history(req.history)
+
+    # Interactive agents must act on an invoice the user actually named in THIS
+    # session. Never silently fall back to a default/sample invoice: otherwise the
+    # grounding agent picks an arbitrary row (e.g. INV0001) and it looks like the
+    # agent "remembered" data from another agent/session. Ask for the invoice.
+    if verb in INTERACTIVE_VERBS and not invoice:
+        return ChatResponse(
+            trace_id=uuid.uuid4().hex,
+            status=PipelineStatus.CLARIFICATION_NEEDED,
+            verb=verb,
+            reply=(
+                f"Which invoice should I {verb.value}? Please provide the invoice "
+                "number (e.g. INV0001)."
+            ),
+        )
+
     invoice = invoice or orch.settings.default_chat_invoice
 
     # For Simulate, derive scenario params from the message so a well-formed
-    # scenario completes in one turn instead of looping on a clarification.
+    # scenario completes in one turn instead of looping on a clarification. If the
+    # current message has none (e.g. the user just supplied the invoice number),
+    # recover a scenario described earlier in THIS session's history.
     scenario_params = req.scenario_params
     if verb is Verb.SIMULATE and not scenario_params:
         scenario_params = _parse_scenario(req.message)
+        if not scenario_params:
+            for turn in reversed(req.history or []):
+                if getattr(turn, "role", "") != "user":
+                    continue
+                parsed = _parse_scenario(getattr(turn, "content", "") or "")
+                if parsed:
+                    scenario_params = parsed
+                    break
 
     if verb in INTERACTIVE_VERBS:
         # Path B: explicit agent + invoice + date.

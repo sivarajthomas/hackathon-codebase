@@ -16,7 +16,7 @@ substitutions:
   _REPO: mcp-servers
   _SERVICE: invoice-backend
   # BigQuery dataset holding the real invoice/shipment data the agents query.
-  _BIGQUERY_DATASET: "invoice_dataset"
+  _BIGQUERY_DATASET: "invoice_master_raw"
   # MCP server URLs the backend grounds through (set to your deployed Cloud Run URLs).
   _BIGQUERY_MCP_URL: "https://bigquery-mcp-836378136559.us-central1.run.app/mcp"
   _GCS_MCP_URL: "https://gcs-mcp-836378136559.us-central1.run.app/mcp"
