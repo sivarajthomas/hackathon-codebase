@@ -5,13 +5,16 @@ pydantic>=2.6
 pydantic-settings>=2.2
 httpx>=0.27
 
+# --- Real integrations (Vertex AI Gemini + MCP grounding) ---
+google-genai>=1.0                  # Vertex AI Gemini SDK (google-genai, vertexai=True)
+google-auth>=2.30                  # identity tokens for authenticated Cloud Run MCP calls
+mcp>=1.0                           # Model Context Protocol client (streamable HTTP)
+
 # --- Placeholders to enable later (uncomment when wiring real integrations) ---
 # google-cloud-bigquery>=3.20
 # google-cloud-storage>=2.16
 # google-cloud-dlp>=3.16
 # google-cloud-aiplatform>=1.60      # Vertex AI (Gemini) for Model-A/B/C
-# google-genai>=1.0                  # Vertex AI Gemini SDK (google-genai, vertexai=True)
 # google-cloud-pubsub>=2.21          # CS queue backing (optional)
 # google-cloud-trace>=1.13           # tracing export
-# mcp>=1.0                           # Model Context Protocol client
 # ragas>=0.1                         # groundedness / faithfulness eval

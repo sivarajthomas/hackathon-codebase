@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     bigquery_mcp_url: str = "REPLACE_ME"
     gcs_mcp_url: str = "REPLACE_ME"
     mcp_timeout_seconds: float = 30.0
+    mcp_use_auth: bool = True  # mint identity tokens for authenticated Cloud Run MCP calls
 
     # --- Retrieval / grounding ---
     vector_index_endpoint: str = "REPLACE_ME"

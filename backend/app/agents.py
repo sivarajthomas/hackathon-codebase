@@ -58,6 +58,24 @@ class ModelA:
             Complexity.COMPLEX: self.settings.model_complex_id,
         }[complexity]
 
+    @staticmethod
+    def _parse_verb(value: Any) -> Optional[Verb]:
+        if not isinstance(value, str):
+            return None
+        try:
+            return Verb(value.strip().lower())
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_complexity(value: Any) -> Optional[Complexity]:
+        if not isinstance(value, str):
+            return None
+        try:
+            return Complexity(value.strip().lower())
+        except ValueError:
+            return None
+
     async def route(
         self,
         question: str,
@@ -65,33 +83,45 @@ class ModelA:
         scenario_params: dict[str, Any],
         forced_verb: Optional[Verb] = None,
     ) -> RoutingDecision:
-        # TODO(placeholder): replace this heuristic with an LLM call to
-        #   settings.router_model_id that returns {verb, complexity, missing_params}.
-        _ = await invoke_llm(
+        # LLM router: returns {verb, complexity, missing_params}. Falls back to the
+        # heuristic below when no creds are configured or the call fails.
+        llm = await invoke_llm(
             self.settings,
             model_id=self.settings.router_model_id,
             system=router_system(),
             messages=[{"role": "user", "content": question}],
+            response_schema={
+                "type": "object",
+                "properties": {
+                    "verb": {"type": "string"},
+                    "complexity": {"type": "string"},
+                },
+            },
         )
+        routed = llm.get("structured") or {}
 
         # Path A/B: the agent (verb) is chosen explicitly -> only pick complexity.
         if forced_verb is not None:
             verb = forced_verb
         else:
-            q = question.lower()
-            verb = Verb.EXPLAIN
-            for candidate, keywords in _VERB_KEYWORDS.items():
-                if any(k in q for k in keywords):
-                    verb = candidate
-                    break
+            verb = self._parse_verb(routed.get("verb"))
+            if verb is None:
+                q = question.lower()
+                verb = Verb.EXPLAIN
+                for candidate, keywords in _VERB_KEYWORDS.items():
+                    if any(k in q for k in keywords):
+                        verb = candidate
+                        break
 
-        words = len(question.split())
-        if words <= 12:
-            complexity = Complexity.EASY
-        elif words <= 30:
-            complexity = Complexity.MEDIUM
-        else:
-            complexity = Complexity.COMPLEX
+        complexity = self._parse_complexity(routed.get("complexity"))
+        if complexity is None:
+            words = len(question.split())
+            if words <= 12:
+                complexity = Complexity.EASY
+            elif words <= 30:
+                complexity = Complexity.MEDIUM
+            else:
+                complexity = Complexity.COMPLEX
 
         missing: list[str] = []
         clarification = None
@@ -149,16 +179,32 @@ class ModelB:
         query_spec = await self._build_sql(question, decision, context, security_scope)
         bq_result = await self.bq_mcp.call_tool("bq_query", query_spec, security_scope)
         gcs_result: dict[str, Any] = {}
+        invoice_number = context.get("invoice_number")
         if decision.verb in (Verb.EXPLAIN, Verb.RESOLVE, Verb.PREVENT):
-            gcs_result = await self.gcs_mcp.analyze_file(
-                self.settings.invoice_resource_uri, security_scope
-            )
+            if invoice_number:
+                # Row-level invoice lookup via the Invoice/GCS MCP.
+                gcs_result = await self.gcs_mcp.find_invoice(invoice_number, security_scope)
+            else:
+                gcs_result = await self.gcs_mcp.analyze_file(
+                    self.settings.invoice_resource_uri, security_scope
+                )
 
         contexts = [c.snippet for c in citations]
         if bq_result.get("rows"):
             contexts.append(f"bigquery:{bq_result['rows']}")
         if gcs_result.get("extracted"):
             contexts.append(f"gcs:{gcs_result['extracted']}")
+            # Surface the retrieved invoice as a first-class citation so the
+            # analysis model can ground its answer on real MCP data.
+            citations.append(
+                Citation(
+                    source_id=f"invoice:{invoice_number or 'resource'}",
+                    source_type="invoice_mcp",
+                    locator=gcs_result.get("uri", invoice_number or "invoice-mcp"),
+                    snippet=str(gcs_result["extracted"])[:500],
+                    score=1.0,
+                )
+            )
 
         consolidated = {
             "citations": [c.model_dump() for c in citations],
@@ -218,56 +264,130 @@ class ModelC:
         decision: RoutingDecision,
         grounded: dict[str, Any],
     ) -> dict[str, Any]:
-        # TODO(placeholder): call settings.analysis_model_id with the question +
-        #   grounded evidence and request structured output matching the verb schema.
-        _ = await invoke_llm(
-            self.settings,
-            model_id=self.settings.analysis_model_id,
-            system=analysis_system(decision.verb),
-            messages=[{"role": "user", "content": question}],
-        )
-
         citations = [Citation(**c) for c in grounded.get("citations", [])]
         evidence = [
             Evidence(label=c.source_type, value=c.snippet, citation=c) for c in citations
         ]
 
+        # Ask the analysis model for structured JSON matching the verb schema,
+        # grounding it on the consolidated evidence. On any failure / no creds the
+        # `structured`/`text` fields come back empty and we fall back to placeholders.
+        grounding_block = "\n".join(f"- {ctx}" for ctx in grounded.get("contexts", []))
+        prompt = (
+            f"Question: {question}\n\n"
+            f"Grounded evidence:\n{grounding_block or '(none)'}\n\n"
+            "Answer strictly from the evidence above and return JSON."
+        )
+        llm = await invoke_llm(
+            self.settings,
+            model_id=self.settings.analysis_model_id,
+            system=analysis_system(decision.verb),
+            messages=[{"role": "user", "content": prompt}],
+            response_schema=self._schema_for(decision.verb),
+        )
+        draft: dict[str, Any] = llm.get("structured") or {}
+        text: str = (llm.get("text") or "").strip()
+
+        def pick(key: str, fallback: str) -> str:
+            value = draft.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            return text or fallback
+
         if decision.verb is Verb.EXPLAIN:
             return {
                 "verb": Verb.EXPLAIN.value,
-                "summary": "[PLACEHOLDER] Concise explanation grounded in the cited sources.",
-                "details": "[PLACEHOLDER] Detailed, cited explanation of the finding/invoice.",
+                "summary": pick(
+                    "summary",
+                    "[PLACEHOLDER] Concise explanation grounded in the cited sources.",
+                ),
+                "details": pick(
+                    "details",
+                    "[PLACEHOLDER] Detailed, cited explanation of the finding/invoice.",
+                ),
                 "citations": [c.model_dump() for c in citations],
             }
 
         if decision.verb is Verb.RESOLVE:
-            return {
-                "verb": Verb.RESOLVE.value,
-                "recommendation": "[PLACEHOLDER] Recommended resolution for the finding.",
-                "actions": [
+            actions = draft.get("actions")
+            if not isinstance(actions, list) or not actions:
+                actions = [
                     {
                         "action_type": "issue_credit",
                         "description": "[PLACEHOLDER] Example actionable step.",
                         "parameters": {},
                     }
-                ],
+                ]
+            return {
+                "verb": Verb.RESOLVE.value,
+                "recommendation": pick(
+                    "recommendation", "[PLACEHOLDER] Recommended resolution for the finding."
+                ),
+                "actions": actions,
                 "evidence": [e.model_dump() for e in evidence],
                 "requires_approval": True,
             }
 
         if decision.verb is Verb.SIMULATE:
+            assumptions = draft.get("assumptions")
+            if not isinstance(assumptions, list) or not assumptions:
+                assumptions = ["[PLACEHOLDER] Stated assumption."]
+            line_items = draft.get("line_items")
+            if not isinstance(line_items, list):
+                line_items = []
             return {
                 "verb": Verb.SIMULATE.value,
                 "scenario": grounded.get("scenario", {}),
-                "projected_outcome": "[PLACEHOLDER] Projected outcome for the scenario.",
-                "line_items": [],
-                "assumptions": ["[PLACEHOLDER] Stated assumption."],
+                "projected_outcome": pick(
+                    "projected_outcome", "[PLACEHOLDER] Projected outcome for the scenario."
+                ),
+                "line_items": line_items,
+                "assumptions": assumptions,
                 "citations": [c.model_dump() for c in citations],
             }
 
-        return {  # PREVENT
+        # PREVENT
+        recommendations = draft.get("recommendations")
+        if not isinstance(recommendations, list) or not recommendations:
+            recommendations = ["[PLACEHOLDER] Preventive recommendation."]
+        return {
             "verb": Verb.PREVENT.value,
-            "root_cause": "[PLACEHOLDER] Identified root cause of the recurring issue.",
-            "recommendations": ["[PLACEHOLDER] Preventive recommendation."],
+            "root_cause": pick(
+                "root_cause", "[PLACEHOLDER] Identified root cause of the recurring issue."
+            ),
+            "recommendations": recommendations,
             "evidence": [e.model_dump() for e in evidence],
+        }
+
+    @staticmethod
+    def _schema_for(verb: Verb) -> dict[str, Any]:
+        """Response schema hint per verb (drives JSON output)."""
+        if verb is Verb.EXPLAIN:
+            return {
+                "type": "object",
+                "properties": {"summary": {"type": "string"}, "details": {"type": "string"}},
+            }
+        if verb is Verb.RESOLVE:
+            return {
+                "type": "object",
+                "properties": {
+                    "recommendation": {"type": "string"},
+                    "actions": {"type": "array"},
+                },
+            }
+        if verb is Verb.SIMULATE:
+            return {
+                "type": "object",
+                "properties": {
+                    "projected_outcome": {"type": "string"},
+                    "line_items": {"type": "array"},
+                    "assumptions": {"type": "array"},
+                },
+            }
+        return {
+            "type": "object",
+            "properties": {
+                "root_cause": {"type": "string"},
+                "recommendations": {"type": "array"},
+            },
         }
