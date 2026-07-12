@@ -176,6 +176,35 @@ class FeedbackPayload(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Chat adapter (free-text chat UI <-> agent pipeline)
+# --------------------------------------------------------------------------- #
+class ChatRequest(BaseModel):
+    """A single free-text chat turn from the frontend, tied to a chosen agent."""
+
+    agent: str  # agent slug: explain | resolve | simulate | prevent
+    message: str
+    invoice_number: Optional[str] = None
+    as_of_date: Optional[date] = None
+    scenario_params: dict[str, Any] = Field(default_factory=dict)
+    trace_id: Optional[str] = None  # set to resume a pending clarification
+    channel: "Channel" = Channel.CS
+    user: Optional[UserContext] = None
+
+
+class ChatResponse(BaseModel):
+    """Chat-friendly, flattened view of a pipeline result for the frontend."""
+
+    trace_id: str
+    status: "PipelineStatus"
+    verb: Optional["Verb"] = None
+    reply: str
+    requires_human_review: bool = False
+    queue_task_id: Optional[str] = None
+    output: Optional[dict[str, Any]] = None
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+# --------------------------------------------------------------------------- #
 # Prevent agent (event-driven) models
 # --------------------------------------------------------------------------- #
 class PreventPayload(BaseModel):

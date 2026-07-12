@@ -3,6 +3,7 @@
 Endpoints
   GET  /health
   POST /v1/process                          -> general pipeline (Model-A auto-routes verb)
+  POST /v1/chat                             -> free-text chat turn (frontend agent chat)
   POST /v1/agents/run                       -> Path B: choose agent + invoice + date
   POST /v1/agents/from-finding/{finding_id} -> Path A: run an agent on a Prevent finding
   POST /v1/clarify/{trace_id}               -> answer a clarification and resume
@@ -20,12 +21,16 @@ import base64
 import json
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
+from .chat_adapter import run_chat
 from .config import Settings, get_settings
 from .orchestrator import Orchestrator
 from .schemas import (
     AgentFromFindingRequest,
     AgentRunRequest,
+    ChatRequest,
+    ChatResponse,
     ClarifyRequest,
     CSQueueTask,
     FeedbackPayload,
@@ -40,6 +45,19 @@ from .schemas import (
 )
 
 app = FastAPI(title="Invoice Processing SaaS", version="0.1.0")
+
+# Allow the browser-based frontend (a separate Cloud Run service / origin) to
+# call this API. Origins are configurable via CORS_ALLOW_ORIGINS (comma-list).
+_allowed_origins = [
+    o.strip() for o in get_settings().cors_allow_origins.split(",") if o.strip()
+] or ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _orchestrator: Orchestrator | None = None
 
@@ -62,6 +80,19 @@ async def process(
     orch: Orchestrator = Depends(get_orchestrator),
 ) -> ProcessResponse:
     return await orch.run(request)
+
+
+@app.post("/v1/chat", response_model=ChatResponse)
+async def chat(
+    body: ChatRequest,
+    orch: Orchestrator = Depends(get_orchestrator),
+) -> ChatResponse:
+    """Free-text chat turn from the frontend agent workspace.
+
+    Adapts a chat message + chosen agent to the pipeline and returns a
+    flattened, chat-friendly text reply plus the underlying structured output.
+    """
+    return await run_chat(orch, body)
 
 
 @app.post("/v1/agents/run", response_model=ProcessResponse)

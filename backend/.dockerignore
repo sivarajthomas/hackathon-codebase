@@ -1,0 +1,10 @@
+# Backend build context excludes (context = repo root, so scope to backend).
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+**/.mypy_cache/
+**/.venv/
+**/venv/
+backend/.env
+backend/tests/

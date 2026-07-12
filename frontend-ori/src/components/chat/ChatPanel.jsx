@@ -7,9 +7,10 @@ import SuggestedPrompts from './SuggestedPrompts'
 import AgentIcon from '../ui/AgentIcon'
 import UpsLogo from '../ui/UpsLogo'
 import { agents } from '../../data/agents'
+import { sendChatMessage } from '../../lib/api'
 
-// Canned, agent-flavored responses. This is a front-end demo — swap `respond`
-// with a real API call to wire up a backend.
+// Fallback, agent-flavored responses used only when the backend is unreachable
+// so the demo stays usable offline. Live replies come from the backend API.
 const CANNED = {
   explain: [
     "Here's the breakdown: the $1,204.50 invoice includes base freight $980.00, fuel surcharge $148.50 (15.15%), and a residential delivery fee $76.00. The fuel surcharge is calculated as a percentage of the base rate per the current weekly index. Want the full line-item export?",
@@ -53,6 +54,8 @@ export default function ChatPanel({ agent }) {
   const [issueQuery, setIssueQuery] = useState('')
   const scrollRef = useRef(null)
   const timers = useRef([])
+  // Per-session trace_id awaiting a clarification answer (Simulate round-trip).
+  const pendingTrace = useRef({})
 
   const active = sessions.find((s) => s.id === activeId) || sessions[0]
 
@@ -63,6 +66,7 @@ export default function ChatPanel({ agent }) {
     setActiveId(s.id)
     setInput('')
     setTyping(false)
+    pendingTrace.current = {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.slug])
 
@@ -75,18 +79,37 @@ export default function ChatPanel({ agent }) {
   const updateSession = (id, updater) =>
     setSessions((prev) => prev.map((s) => (s.id === id ? updater(s) : s)))
 
-  const respondTo = (id) => {
+  const respondTo = async (id, text) => {
     setTyping(true)
-    const bank = CANNED[agent.slug] || CANNED.explain
-    const reply = bank[Math.floor(Math.random() * bank.length)]
-    const t = setTimeout(() => {
-      setTyping(false)
+    try {
+      const res = await sendChatMessage({
+        agent: agent.slug,
+        message: text,
+        traceId: pendingTrace.current[id],
+      })
+      // Remember the trace_id while a clarification is pending so the next
+      // message resumes that run; clear it once the turn is resolved.
+      if (res.status === 'clarification_needed') {
+        pendingTrace.current[id] = res.traceId
+      } else {
+        delete pendingTrace.current[id]
+      }
+      updateSession(id, (s) => ({
+        ...s,
+        messages: [...s.messages, { id: uid(), role: 'ai', text: res.reply }],
+      }))
+    } catch {
+      // Backend unreachable — fall back to a canned reply so the demo continues.
+      delete pendingTrace.current[id]
+      const bank = CANNED[agent.slug] || CANNED.explain
+      const reply = bank[Math.floor(Math.random() * bank.length)]
       updateSession(id, (s) => ({
         ...s,
         messages: [...s.messages, { id: uid(), role: 'ai', text: reply }],
       }))
-    }, 500 + Math.random() * 350)
-    timers.current.push(t)
+    } finally {
+      setTyping(false)
+    }
   }
 
   const send = (text) => {
@@ -104,7 +127,7 @@ export default function ChatPanel({ agent }) {
       messages: [...s.messages, { id: uid(), role: 'user', text: value }],
     }))
     setInput('')
-    respondTo(id)
+    respondTo(id, value)
   }
 
   const onSubmit = (e) => {
@@ -119,6 +142,7 @@ export default function ChatPanel({ agent }) {
     setInput('')
     setTyping(false)
     setSidebarOpen(false)
+    delete pendingTrace.current[s.id]
   }
 
   const selectSession = (id) => {

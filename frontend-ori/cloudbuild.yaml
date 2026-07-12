@@ -1,0 +1,56 @@
+# Cloud Build pipeline for the OneInvoice frontend (Vite + React SPA).
+#
+# Builds the static bundle into an nginx image (context = frontend-ori/, the
+# folder is self-contained), pushes it to Artifact Registry, and deploys to
+# Cloud Run with public access. The backend API URL is baked into the bundle at
+# build time via the VITE_API_BASE_URL build arg (_BACKEND_URL substitution).
+#
+# GitHub trigger: set the build config path to "frontend-ori/cloudbuild.yaml".
+# Manual run (from the repository root):
+#   gcloud builds submit ./frontend-ori --config frontend-ori/cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_REPO=mcp-servers,\
+# _BACKEND_URL=https://invoice-backend-xxxx.run.app
+
+substitutions:
+  _REGION: us-central1
+  _REPO: mcp-servers
+  _SERVICE: oneinvoice-frontend
+  # Deployed backend Cloud Run URL that the browser calls.
+  _BACKEND_URL: "REPLACE_ME"
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - frontend-ori/Dockerfile
+      - --build-arg
+      - VITE_API_BASE_URL=${_BACKEND_URL}
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - frontend-ori
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - --region=${_REGION}
+      - --platform=managed
+      - --port=8080
+      - --allow-unauthenticated
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1200s

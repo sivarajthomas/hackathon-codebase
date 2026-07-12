@@ -1,0 +1,58 @@
+# Cloud Build pipeline for the Invoice Processing SaaS backend (FastAPI).
+#
+# Builds the image (context = repo root so the Dockerfile can COPY ./backend),
+# pushes it to Artifact Registry, and deploys it to Cloud Run.
+#
+# GitHub trigger: set the build config path to "backend/cloudbuild.yaml".
+# Manual run (from the repository root):
+#   gcloud builds submit . --config backend/cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_REPO=mcp-servers,\
+# _BIGQUERY_MCP_URL=https://bigquery-mcp-xxxx.run.app,\
+# _GCS_MCP_URL=https://gcs-mcp-xxxx.run.app
+
+substitutions:
+  _REGION: us-central1
+  _REPO: mcp-servers
+  _SERVICE: invoice-backend
+  # MCP server URLs the backend grounds through (set to your deployed Cloud Run URLs).
+  _BIGQUERY_MCP_URL: "REPLACE_ME"
+  _GCS_MCP_URL: "REPLACE_ME"
+  # Comma-separated browser origins allowed to call the API (the frontend URL).
+  # "*" is convenient for a public demo frontend.
+  _CORS_ALLOW_ORIGINS: "*"
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - backend/Dockerfile
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - .
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - --region=${_REGION}
+      - --platform=managed
+      - --port=8080
+      - --allow-unauthenticated
+      - --set-env-vars=ENVIRONMENT=production,GCP_PROJECT_ID=$PROJECT_ID,GCP_LOCATION=${_REGION},BIGQUERY_MCP_URL=${_BIGQUERY_MCP_URL},GCS_MCP_URL=${_GCS_MCP_URL},CORS_ALLOW_ORIGINS=${_CORS_ALLOW_ORIGINS}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1200s

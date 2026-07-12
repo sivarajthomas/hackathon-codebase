@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     app_name: str = "Invoice Processing SaaS"
     environment: str = "dev"
 
+    # --- HTTP / frontend integration ---
+    # Comma-separated list of browser origins allowed to call the API (CORS).
+    # "*" allows any origin (suitable for a public demo frontend).
+    cors_allow_origins: str = "*"
+    # Fallback invoice number used by the chat adapter when the caller does not
+    # supply one and none can be parsed from the free-text message.
+    default_chat_invoice: str = "INV-00000"
+
     # --- GCP (placeholders) ---
     gcp_project_id: str = "REPLACE_ME"
     gcp_location: str = "us-central1"
