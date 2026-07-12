@@ -8,27 +8,27 @@
 #     --build-arg VITE_API_BASE_URL=https://invoice-backend-xxxx.run.app ./frontend-ori
 
 # ---- Build stage ----------------------------------------------------------
-# node:22 (glibc) ships a fixed npm (10.9.x). The older npm 10.8.2 bundled with
-# node:20-slim crashes with "Exit handler never called!" during install.
+# Build with Yarn (via Corepack). npm crashes with "Exit handler never called!"
+# in the Cloud Build environment regardless of Node/npm version; Yarn installs
+# reliably and resolves the Linux-specific Rollup optional binary that Vite needs.
 FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 
 # The backend API base URL is baked into the static bundle at build time.
 ARG VITE_API_BASE_URL=""
-ENV VITE_API_BASE_URL=${VITE_API_BASE_URL} \
-    npm_config_update_notifier=false \
-    npm_config_fund=false \
-    npm_config_audit=false
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 
-COPY package.json package-lock.json ./
-# Use `npm install` (not `npm ci`): the lockfile is generated on Windows and
-# `npm ci` fails to install the Linux-specific Rollup optional binary, which
-# would break `vite build`. `npm install` reconciles platform optional deps.
-RUN npm install --no-audit --no-fund
+# Enable the Yarn shim bundled with Node.
+RUN corepack enable
+
+# Copy only package.json (Yarn resolves fresh; the committed package-lock.json
+# is npm-specific and generated on Windows).
+COPY package.json ./
+RUN yarn install --network-timeout 600000
 
 COPY . .
-RUN npm run build
+RUN yarn build
 
 # ---- Runtime stage --------------------------------------------------------
 FROM nginx:1.27-alpine
