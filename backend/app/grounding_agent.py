@@ -297,7 +297,13 @@ async def gather_evidence(
                 logger.warning("Could not connect MCP server %s: %s", target.key, exc)
 
         if not hub.has_tools:
+            logger.warning("Grounding agent: no MCP tools advertised; nothing to ground on.")
             return GroundingResult(answer="", proof=proof)
+
+        logger.info(
+            "Grounding agent: advertising %d tools across %d server(s), model=%s",
+            len(hub._declarations), len(hub._sessions), model_id,
+        )
 
         tools = hub.tools()
         contents = [types.Content(role="user", parts=[types.Part.from_text(text=question)])]
@@ -309,10 +315,15 @@ async def gather_evidence(
         )
 
         final_text = ""
-        for _ in range(settings.mcp_max_tool_iterations):
-            response = await client.aio.models.generate_content(
-                model=model_id, contents=contents, config=config
-            )
+        for iteration in range(settings.mcp_max_tool_iterations):
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model_id, contents=contents, config=config
+                )
+            except Exception as exc:
+                logger.warning("Grounding agent: generate_content failed: %s", exc)
+                break
+
             candidate = response.candidates[0] if response.candidates else None
             model_content = candidate.content if candidate else None
             calls = _function_calls(model_content)
@@ -322,8 +333,17 @@ async def gather_evidence(
 
             if not calls:
                 final_text = _extract_text(model_content)
+                logger.info(
+                    "Grounding agent: no tool calls at iteration %d; ending "
+                    "(final_text_len=%d, proof=%d).",
+                    iteration, len(final_text), len(proof),
+                )
                 break
 
+            logger.info(
+                "Grounding agent: iteration %d -> %d tool call(s): %s",
+                iteration, len(calls), ", ".join(c.name for c in calls),
+            )
             response_parts: list[Any] = []
             for call in calls:
                 arguments: dict[str, Any] = dict(call.args or {})
@@ -344,4 +364,8 @@ async def gather_evidence(
                 )
             contents.append(types.Content(role="user", parts=response_parts))
 
+        logger.info(
+            "Grounding agent: finished with %d proof item(s) (%d non-error).",
+            len(proof), sum(1 for p in proof if not p.is_error),
+        )
         return GroundingResult(answer=final_text, proof=proof)

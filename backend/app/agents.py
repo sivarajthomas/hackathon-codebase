@@ -10,6 +10,7 @@ end-to-end; each is marked where a real LLM call plugs in.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Optional
 
@@ -39,6 +40,8 @@ from .schemas import (
     UserContext,
     Verb,
 )
+
+logger = logging.getLogger(__name__)
 
 # Prevent is event-driven (Pub/Sub), so the interactive router never selects it.
 _VERB_KEYWORDS: dict[Verb, tuple[str, ...]] = {
@@ -334,7 +337,7 @@ class ModelB:
             agent_question = f"{question}\n\nKnown identifiers: {', '.join(hints)}"
 
         result = await gather_evidence(
-            agent_question, decision.chosen_model_id, self.settings
+            agent_question, self.settings.grounding_model_id, self.settings
         )
 
         rows: list[Any] = []
@@ -360,6 +363,11 @@ class ModelB:
 
         # Fall back to the legacy single-shot SQL path only if nothing was gathered.
         if not result.proof:
+            logger.warning(
+                "Agentic grounding produced no proof; falling back to single-shot SQL "
+                "(agent_answer_len=%d).",
+                len(result.answer or ""),
+            )
             query_spec = await self._build_sql(question, decision, context, security_scope)
             legacy = await self.bq_mcp.call_tool("bq_query", query_spec, security_scope)
             legacy_rows = legacy.get("rows")
