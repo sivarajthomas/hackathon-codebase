@@ -34,6 +34,19 @@ class Complexity(str, Enum):
     COMPLEX = "complex"
 
 
+class DataSource(str, Enum):
+    """Which MCP grounding source to consult for a question.
+
+    - ``bigquery``      : structured operational data — invoices, shipments,
+                          logistics, tax, surcharges, charges, rates, amounts.
+    - ``gcs_knowledge`` : documents / policies — terms, contracts, guidelines,
+                          SOPs, compliance and other reference material.
+    """
+
+    BIGQUERY = "bigquery"
+    GCS_KNOWLEDGE = "gcs_knowledge"
+
+
 class Channel(str, Enum):
     CS = "cs"                     # internal CS console: human-in-the-loop available
     CUSTOMER_PORTAL = "customer"  # self-service portal: NO CS human present
@@ -334,6 +347,7 @@ class RoutingDecision(BaseModel):
     verb: Verb
     complexity: Complexity
     chosen_model_id: str
+    data_source: DataSource = DataSource.BIGQUERY
     missing_params: list[str] = Field(default_factory=list)
     clarification_question: Optional[str] = None
     rationale: str = ""

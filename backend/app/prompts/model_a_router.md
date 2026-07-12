@@ -14,7 +14,15 @@ return them as JSON only.
    - `easy`    — single fact/lookup, one invoice, no math.
    - `medium`  — multi-field reasoning, one contract, light calculation.
    - `complex` — cross-contract/temporal reasoning, multi-step math, ambiguous intent.
-3. **missing_params** — parameters you need before work can proceed.
+3. **data_source** — which MCP grounding source to consult. One of:
+   - `bigquery`      — structured operational data: invoices, shipments, logistics,
+     tax, surcharges, charges, rates, fees, amounts, totals, payments, tracking.
+   - `gcs_knowledge` — policies and reference documents: terms, contract clauses,
+     guidelines, SOPs, compliance rules, handbooks, FAQs.
+   Default to `bigquery` when a concrete invoice/finding is referenced or the
+   question is about numbers/charges. Choose `gcs_knowledge` only when the user
+   is asking about a policy, rule, or document rather than specific data.
+4. **missing_params** — parameters you need before work can proceed.
    - For `simulate`, if no scenario parameters are supplied, add `"scenario_params"`
      and provide a short `clarification_question` asking for rate/quantity/date-range/currency.
 
@@ -29,6 +37,7 @@ return them as JSON only.
 {
   "verb": "explain|resolve|simulate",
   "complexity": "easy|medium|complex",
+  "data_source": "bigquery|gcs_knowledge",
   "missing_params": [],
   "clarification_question": null,
   "rationale": "one short sentence"

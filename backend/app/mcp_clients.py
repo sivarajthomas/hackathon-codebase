@@ -151,7 +151,12 @@ class BigQueryMCPClient:
 
 
 class GCSMCPClient:
-    """Invoice/Shipment MCP (FastMCP, GCS-backed) over Streamable HTTP."""
+    """Knowledge/document MCP (FastMCP, GCS-backed) over Streamable HTTP.
+
+    Used for **policies and reference documents** only. Structured operational
+    data (invoices, shipments, tax, surcharge, logistics) is served by the
+    BigQuery MCP, not here.
+    """
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -166,38 +171,38 @@ class GCSMCPClient:
                 self.settings.mcp_use_auth, self.settings.mcp_timeout_seconds,
             )
         except Exception as exc:
-            logger.warning("GCS/Invoice MCP call failed (%s): %s", tool_name, exc)
+            logger.warning("GCS knowledge MCP call failed (%s): %s", tool_name, exc)
             return None
 
-    async def find_invoice(
-        self, invoice_id: str, security_scope: dict[str, Any]
+    @staticmethod
+    def _unwrap(data: Any) -> Any:
+        """Unwrap the {"status": ..., "data": {...}} response envelope."""
+        return data.get("data") if isinstance(data, dict) and "data" in data else data
+
+    async def list_knowledge_files(self, security_scope: dict[str, Any]) -> dict[str, Any]:
+        """List available policy/reference files via ``knowledge_list_files``."""
+        data = await self._call("knowledge_list_files", {"prefix": ""})
+        if data is None:
+            return {"files": [], "scope_applied": security_scope,
+                    "note": "[PLACEHOLDER] GCS knowledge listing."}
+        payload = self._unwrap(data)
+        files: list[str] = []
+        if isinstance(payload, dict):
+            raw = payload.get("files") or payload.get("keys") or []
+            for item in raw:
+                files.append(item.get("key") if isinstance(item, dict) else str(item))
+        elif isinstance(payload, list):
+            files = [item.get("key") if isinstance(item, dict) else str(item) for item in payload]
+        return {"files": files, "scope_applied": security_scope}
+
+    async def read_knowledge_file(
+        self, key: str, security_scope: dict[str, Any]
     ) -> dict[str, Any]:
-        """Retrieve an invoice by id via the ``find_invoice`` tool."""
-        data = await self._call("find_invoice", {"invoice_id": invoice_id})
+        """Read a single policy/reference file via ``knowledge_read_file``."""
+        data = await self._call("knowledge_read_file", {"key": key, "parse": True})
         if data is None:
-            return {
-                "invoice_id": invoice_id,
-                "extracted": {},
-                "scope_applied": security_scope,
-                "note": "[PLACEHOLDER] Invoice MCP lookup.",
-            }
-        # The MCP wraps payloads in a response envelope: {"status": "...", "data": {...}}.
-        extracted = data.get("data") if isinstance(data, dict) and "data" in data else data
-        return {"invoice_id": invoice_id, "extracted": extracted, "scope_applied": security_scope}
-
-    async def read_file(self, uri: str, security_scope: dict[str, Any]) -> dict[str, Any]:
-        data = await self._call("knowledge_read_file", {"key": uri, "parse": True})
-        if data is None:
-            return {"uri": uri, "content": "", "scope_applied": security_scope,
-                    "note": "[PLACEHOLDER] GCS MCP file read."}
-        content = data.get("data") if isinstance(data, dict) and "data" in data else data
-        return {"uri": uri, "content": content, "scope_applied": security_scope}
-
-    async def analyze_file(self, uri: str, security_scope: dict[str, Any]) -> dict[str, Any]:
-        """Kept for compatibility; treats ``uri`` as an invoice id when possible."""
-        data = await self._call("knowledge_read_file", {"key": uri, "parse": True})
-        if data is None:
-            return {"uri": uri, "extracted": {}, "scope_applied": security_scope,
-                    "note": "[PLACEHOLDER] GCS MCP file analysis."}
-        extracted = data.get("data") if isinstance(data, dict) and "data" in data else data
-        return {"uri": uri, "extracted": extracted, "scope_applied": security_scope}
+            return {"key": key, "content": "", "scope_applied": security_scope,
+                    "note": "[PLACEHOLDER] GCS knowledge read."}
+        payload = self._unwrap(data)
+        content = payload.get("content") if isinstance(payload, dict) and "content" in payload else payload
+        return {"key": key, "content": content, "scope_applied": security_scope}

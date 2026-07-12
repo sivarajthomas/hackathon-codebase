@@ -10,6 +10,7 @@ end-to-end; each is marked where a real LLM call plugs in.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from .config import Settings
@@ -31,6 +32,7 @@ from .retrieval import (
 from .schemas import (
     Citation,
     Complexity,
+    DataSource,
     Evidence,
     RoutingDecision,
     UserContext,
@@ -43,6 +45,21 @@ _VERB_KEYWORDS: dict[Verb, tuple[str, ...]] = {
     Verb.SIMULATE: ("simulate", "what if", "what-if", "scenario", "project", "if i"),
     Verb.EXPLAIN: ("explain", "why", "what is", "how", "breakdown", "understand"),
 }
+
+# Structured operational data lives in BigQuery; reference documents/policies in GCS.
+_BIGQUERY_KEYWORDS: tuple[str, ...] = (
+    "invoice", "shipment", "shipping", "logistic", "logistics", "freight",
+    "tax", "vat", "gst", "duty", "surcharge", "charge", "fee", "rate",
+    "amount", "total", "cost", "price", "billing", "bill", "line item",
+    "line-item", "quantity", "weight", "tracking", "delivery", "carrier",
+    "payment", "credit", "refund", "balance", "due", "currency",
+)
+_GCS_KNOWLEDGE_KEYWORDS: tuple[str, ...] = (
+    "policy", "policies", "document", "documentation", "terms", "term",
+    "contract clause", "clause", "guideline", "guidelines", "agreement",
+    "procedure", "sop", "compliance", "regulation", "rule book", "handbook",
+    "faq", "manual", "reference", "standard", "how do i", "what is the policy",
+)
 
 
 class ModelA:
@@ -76,6 +93,34 @@ class ModelA:
         except ValueError:
             return None
 
+    @staticmethod
+    def _parse_data_source(value: Any) -> Optional[DataSource]:
+        if not isinstance(value, str):
+            return None
+        try:
+            return DataSource(value.strip().lower())
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _classify_data_source(question: str, context: dict[str, Any]) -> DataSource:
+        """Heuristic MCP selection when the LLM does not decide.
+
+        Structured operational questions (invoice/shipment/tax/surcharge/logistics)
+        go to BigQuery; policy/document questions go to the GCS knowledge source.
+        """
+        q = question.lower()
+        gcs_hits = sum(1 for k in _GCS_KNOWLEDGE_KEYWORDS if k in q)
+        bq_hits = sum(1 for k in _BIGQUERY_KEYWORDS if k in q)
+        # A concrete invoice/finding reference is always structured -> BigQuery.
+        if context.get("invoice_number") or context.get("finding_id"):
+            bq_hits += 1
+        # Prefer the knowledge source whenever an explicit policy/document cue is
+        # present and it is at least as strong as the structured-data signal.
+        if gcs_hits and gcs_hits >= bq_hits:
+            return DataSource.GCS_KNOWLEDGE
+        return DataSource.BIGQUERY
+
     async def route(
         self,
         question: str,
@@ -83,8 +128,9 @@ class ModelA:
         scenario_params: dict[str, Any],
         forced_verb: Optional[Verb] = None,
     ) -> RoutingDecision:
-        # LLM router: returns {verb, complexity, missing_params}. Falls back to the
-        # heuristic below when no creds are configured or the call fails.
+        # LLM router: returns {verb, complexity, data_source, missing_params}.
+        # Falls back to the heuristics below when no creds are configured or the
+        # call fails.
         llm = await invoke_llm(
             self.settings,
             model_id=self.settings.router_model_id,
@@ -95,6 +141,7 @@ class ModelA:
                 "properties": {
                     "verb": {"type": "string"},
                     "complexity": {"type": "string"},
+                    "data_source": {"type": "string"},
                 },
             },
         )
@@ -123,6 +170,11 @@ class ModelA:
             else:
                 complexity = Complexity.COMPLEX
 
+        # MCP selection: structured data -> BigQuery, policies/docs -> GCS knowledge.
+        data_source = self._parse_data_source(routed.get("data_source"))
+        if data_source is None:
+            data_source = self._classify_data_source(question, context)
+
         missing: list[str] = []
         clarification = None
         if verb is Verb.SIMULATE and not scenario_params:
@@ -136,9 +188,13 @@ class ModelA:
             verb=verb,
             complexity=complexity,
             chosen_model_id=self._model_for(complexity),
+            data_source=data_source,
             missing_params=missing,
             clarification_question=clarification,
-            rationale=f"heuristic: matched verb={verb.value}, complexity={complexity.value}",
+            rationale=(
+                f"matched verb={verb.value}, complexity={complexity.value}, "
+                f"source={data_source.value}"
+            ),
         )
 
 
@@ -174,46 +230,83 @@ class ModelB:
         citations: list[Citation] = await rerank(question, candidates, self.settings)
 
         # --- MCP tool use (least-privilege, row-level filtered) ---
+        # MCP selection is decided by the router:
+        #   * BigQuery      -> structured data (invoices, shipments, tax, surcharge, logistics)
+        #   * GCS knowledge -> policies / documents / reference material
         security_scope = filters
-        # Question -> BigQuery SQL (parameterized), then execute via the BQ MCP tool.
-        query_spec = await self._build_sql(question, decision, context, security_scope)
-        bq_result = await self.bq_mcp.call_tool("bq_query", query_spec, security_scope)
+        bq_result: dict[str, Any] = {}
         gcs_result: dict[str, Any] = {}
-        invoice_number = context.get("invoice_number")
-        if decision.verb in (Verb.EXPLAIN, Verb.RESOLVE, Verb.PREVENT):
-            if invoice_number:
-                # Row-level invoice lookup via the Invoice/GCS MCP.
-                gcs_result = await self.gcs_mcp.find_invoice(invoice_number, security_scope)
-            else:
-                gcs_result = await self.gcs_mcp.analyze_file(
-                    self.settings.invoice_resource_uri, security_scope
-                )
-
         contexts = [c.snippet for c in citations]
-        if bq_result.get("rows"):
-            contexts.append(f"bigquery:{bq_result['rows']}")
-        if gcs_result.get("extracted"):
-            contexts.append(f"gcs:{gcs_result['extracted']}")
-            # Surface the retrieved invoice as a first-class citation so the
-            # analysis model can ground its answer on real MCP data.
-            citations.append(
-                Citation(
-                    source_id=f"invoice:{invoice_number or 'resource'}",
-                    source_type="invoice_mcp",
-                    locator=gcs_result.get("uri", invoice_number or "invoice-mcp"),
-                    snippet=str(gcs_result["extracted"])[:500],
-                    score=1.0,
+
+        if decision.data_source is DataSource.GCS_KNOWLEDGE:
+            gcs_result = await self._fetch_knowledge(question, context, security_scope)
+            documents = gcs_result.get("documents") or []
+            for doc in documents:
+                snippet = str(doc.get("content", ""))[:800]
+                if not snippet:
+                    continue
+                contexts.append(f"gcs:{doc.get('key', 'document')}:{snippet}")
+                citations.append(
+                    Citation(
+                        source_id=f"doc:{doc.get('key', 'document')}",
+                        source_type="gcs_knowledge",
+                        locator=doc.get("key", "gcs-knowledge"),
+                        snippet=snippet[:500],
+                        score=1.0,
+                    )
                 )
-            )
+        else:
+            # Structured data: NL question -> parameterized BigQuery SQL, then execute.
+            query_spec = await self._build_sql(question, decision, context, security_scope)
+            bq_result = await self.bq_mcp.call_tool("bq_query", query_spec, security_scope)
+            rows = bq_result.get("rows")
+            if rows:
+                contexts.append(f"bigquery:{rows}")
+                citations.append(
+                    Citation(
+                        source_id=f"bigquery:{context.get('invoice_number') or 'query'}",
+                        source_type="bigquery",
+                        locator=self.settings.bigquery_dataset or "bigquery",
+                        snippet=str(rows)[:500],
+                        score=1.0,
+                    )
+                )
 
         consolidated = {
             "citations": [c.model_dump() for c in citations],
             "contexts": contexts,
+            "data_source": decision.data_source.value,
             "mcp_results": {"bigquery": bq_result, "gcs": gcs_result},
             "cache_hit": False,
         }
         await semantic_cache_set(question, filters, consolidated, self.settings)
         return consolidated
+
+    async def _fetch_knowledge(
+        self,
+        question: str,
+        context: dict[str, Any],
+        security_scope: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read the most relevant policy/reference documents from the GCS MCP."""
+        listing = await self.gcs_mcp.list_knowledge_files(security_scope)
+        files = listing.get("files") or []
+
+        # Rank files by keyword overlap with the question; fall back to first few.
+        tokens = {t for t in re.findall(r"[a-z0-9]{4,}", question.lower())}
+
+        def score(key: str) -> int:
+            low = key.lower()
+            return sum(1 for t in tokens if t in low)
+
+        ranked = sorted(files, key=score, reverse=True)
+        selected = [f for f in ranked if score(f) > 0][:3] or ranked[:2]
+
+        documents: list[dict[str, Any]] = []
+        for key in selected:
+            read = await self.gcs_mcp.read_knowledge_file(key, security_scope)
+            documents.append({"key": key, "content": read.get("content", "")})
+        return {"documents": documents, "listed": files}
 
     async def _build_sql(
         self,
@@ -222,19 +315,17 @@ class ModelB:
         context: dict[str, Any],
         security_scope: dict[str, Any],
     ) -> dict[str, Any]:
-        """Translate the NL question into parameterized BigQuery SQL.
+        """Translate the NL question into executable BigQuery SQL.
 
         This is *where* the question becomes a BQ query. The generated SQL is
-        executed by the `bq_query` MCP tool. The security scope is always
-        re-applied here (defense in depth) and again server-side by the MCP.
+        executed by the `bq_query` MCP tool (BigQuery `execute_sql`, which accepts
+        a raw SQL string). The security scope is re-applied here (defense in depth)
+        and again server-side by the MCP.
         """
-        # TODO(placeholder): call the LLM to emit safe, parameterized SQL, e.g.
-        #   response_schema = {"sql": str, "params": object}. Use the mid/complex
-        #   model tier chosen by the router for harder questions.
         result = await invoke_llm(
             self.settings,
             model_id=decision.chosen_model_id,
-            system=nl2sql_system(),
+            system=f"{nl2sql_system()}\n\n{self._sql_context(context, security_scope)}",
             messages=[{"role": "user", "content": question}],
             response_schema={
                 "type": "object",
@@ -250,6 +341,31 @@ class ModelB:
             "currency": security_scope.get("currency"),
         }
         return {"sql": structured.get("sql", ""), "params": params}
+
+    def _sql_context(self, context: dict[str, Any], security_scope: dict[str, Any]) -> str:
+        """Dynamic, deploy-specific schema + identifier hints for NL->SQL.
+
+        Supplies the real fully-qualified table names and the concrete
+        invoice/finding identifiers so the model emits directly-executable SQL.
+        """
+        project = self.settings.gcp_project_id
+        dataset = self.settings.bigquery_dataset
+        fq = f"`{project}.{dataset}`" if project and dataset else "the configured dataset"
+        return (
+            "## Execution context (authoritative — overrides schema hints above)\n"
+            f"- Fully-qualified dataset: {fq}\n"
+            f"- Analyzed data table: {fq}.{self.settings.bigquery_analyzed_table}\n"
+            f"- Findings table: {fq}.{self.settings.bigquery_findings_table}\n"
+            f"- invoice_number: {context.get('invoice_number') or '(none)'}\n"
+            f"- finding_id: {context.get('finding_id') or '(none)'}\n"
+            f"- contract_ids: {security_scope.get('contract_ids') or '(none)'}\n"
+            f"- geo: {security_scope.get('geo') or '(none)'}\n"
+            f"- currency: {security_scope.get('currency') or '(none)'}\n"
+            "- The execution tool accepts a raw SQL string ONLY and does NOT bind "
+            "query parameters. Inline the identifier values above as safe SQL "
+            "literals (single-quoted strings); do NOT emit `@param` placeholders.\n"
+            "- Emit a single read-only SELECT. Add a small LIMIT for safety."
+        )
 
 
 class ModelC:
