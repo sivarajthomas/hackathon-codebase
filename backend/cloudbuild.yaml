@@ -15,8 +15,8 @@ substitutions:
   _REPO: mcp-servers
   _SERVICE: invoice-backend
   # MCP server URLs the backend grounds through (set to your deployed Cloud Run URLs).
-  _BIGQUERY_MCP_URL: "REPLACE_ME"
-  _GCS_MCP_URL: "REPLACE_ME"
+  _BIGQUERY_MCP_URL: "https://bigquery-mcp-836378136559.us-central1.run.app/mcp"
+  _GCS_MCP_URL: "https://gcs-mcp-836378136559.us-central1.run.app/mcp"
   # Comma-separated browser origins allowed to call the API (the frontend URL).
   # "*" is convenient for a public demo frontend.
   _CORS_ALLOW_ORIGINS: "*"
@@ -51,6 +51,7 @@ steps:
       - --port=8080
       - --allow-unauthenticated
       - --set-env-vars=ENVIRONMENT=production,GCP_PROJECT_ID=$PROJECT_ID,GCP_LOCATION=${_REGION},BIGQUERY_MCP_URL=${_BIGQUERY_MCP_URL},GCS_MCP_URL=${_GCS_MCP_URL},CORS_ALLOW_ORIGINS=${_CORS_ALLOW_ORIGINS}
+      - --service-account=cloud-run-sa@project-00c7b34c-acc0-4431-afb.iam.gserviceaccount.com
 
 options:
   logging: CLOUD_LOGGING_ONLY
