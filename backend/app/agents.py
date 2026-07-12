@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from .config import Settings
 from .llm import invoke_llm
+from .grounding_agent import gather_evidence
 from .mcp_clients import BigQueryMCPClient, GCSMCPClient
 from .prompts import (
     analysis_system,
@@ -256,21 +257,13 @@ class ModelB:
                     )
                 )
         else:
-            # Structured data: NL question -> parameterized BigQuery SQL, then execute.
-            query_spec = await self._build_sql(question, decision, context, security_scope)
-            bq_result = await self.bq_mcp.call_tool("bq_query", query_spec, security_scope)
-            rows = bq_result.get("rows")
-            if rows:
-                contexts.append(f"bigquery:{rows}")
-                citations.append(
-                    Citation(
-                        source_id=f"bigquery:{context.get('invoice_number') or 'query'}",
-                        source_type="bigquery",
-                        locator=self.settings.bigquery_dataset or "bigquery",
-                        snippet=str(rows)[:500],
-                        score=1.0,
-                    )
-                )
+            # Structured data: discovery-first tool-calling loop (schema discovery
+            # -> execute_sql) over the live MCP servers. This mirrors the working
+            # orchestrator agent and avoids the empty-result problem of guessing
+            # table names / imposing scope filters with no scope context.
+            bq_result = await self._agentic_fetch(
+                question, decision, context, security_scope, contexts, citations
+            )
 
         consolidated = {
             "citations": [c.model_dump() for c in citations],
@@ -307,6 +300,98 @@ class ModelB:
             read = await self.gcs_mcp.read_knowledge_file(key, security_scope)
             documents.append({"key": key, "content": read.get("content", "")})
         return {"documents": documents, "listed": files}
+
+    async def _agentic_fetch(
+        self,
+        question: str,
+        decision: RoutingDecision,
+        context: dict[str, Any],
+        security_scope: dict[str, Any],
+        contexts: list[str],
+        citations: list[Citation],
+    ) -> dict[str, Any]:
+        """Discovery-first tool-calling grounding (ported from the orchestrator).
+
+        Lets Gemini explore the live MCP schema and run `execute_sql` itself, then
+        harvests every tool result as evidence. Mutates ``contexts``/``citations``
+        in place. Falls back to the single-shot NL->SQL path when the agent could
+        not gather anything (e.g. Vertex/MCP unconfigured in local dev).
+        """
+        # Give the agent the concrete identifiers we already know.
+        hints: list[str] = []
+        if context.get("invoice_number"):
+            hints.append(f"invoice_number={context['invoice_number']}")
+        if context.get("finding_id"):
+            hints.append(f"finding_id={context['finding_id']}")
+        if security_scope.get("contract_ids"):
+            hints.append(f"contract_ids={security_scope['contract_ids']}")
+        if security_scope.get("geo"):
+            hints.append(f"geo={security_scope['geo']}")
+        if security_scope.get("currency"):
+            hints.append(f"currency={security_scope['currency']}")
+        agent_question = question
+        if hints:
+            agent_question = f"{question}\n\nKnown identifiers: {', '.join(hints)}"
+
+        result = await gather_evidence(
+            agent_question, decision.chosen_model_id, self.settings
+        )
+
+        rows: list[Any] = []
+        for item in result.proof:
+            if item.is_error or item.result in (None, [], {}):
+                continue
+            snippet = str(item.result)[:800]
+            contexts.append(f"{item.server}:{item.tool}:{snippet}")
+            citations.append(
+                Citation(
+                    source_id=f"{item.server}:{item.tool}",
+                    source_type=item.server,
+                    locator=f"{item.server}:{item.tool}",
+                    snippet=snippet[:500],
+                    score=1.0,
+                )
+            )
+            if item.tool.endswith("execute_sql") or item.tool == "execute_sql":
+                rows.append(item.result)
+
+        if result.answer:
+            contexts.append(f"agent_answer:{result.answer}")
+
+        # Fall back to the legacy single-shot SQL path only if nothing was gathered.
+        if not result.proof:
+            query_spec = await self._build_sql(question, decision, context, security_scope)
+            legacy = await self.bq_mcp.call_tool("bq_query", query_spec, security_scope)
+            legacy_rows = legacy.get("rows")
+            if legacy_rows:
+                contexts.append(f"bigquery:{legacy_rows}")
+                citations.append(
+                    Citation(
+                        source_id=f"bigquery:{context.get('invoice_number') or 'query'}",
+                        source_type="bigquery",
+                        locator=self.settings.bigquery_dataset or "bigquery",
+                        snippet=str(legacy_rows)[:500],
+                        score=1.0,
+                    )
+                )
+            return legacy
+
+        return {
+            "tool": "agentic",
+            "rows": rows,
+            "answer": result.answer,
+            "proof": [
+                {
+                    "server": p.server,
+                    "tool": p.tool,
+                    "arguments": p.arguments,
+                    "result": p.result,
+                    "is_error": p.is_error,
+                }
+                for p in result.proof
+            ],
+            "scope_applied": security_scope,
+        }
 
     async def _build_sql(
         self,

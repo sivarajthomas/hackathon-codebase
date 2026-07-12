@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     gcs_mcp_url: str = "REPLACE_ME"
     mcp_timeout_seconds: float = 30.0
     mcp_use_auth: bool = True  # mint identity tokens for authenticated Cloud Run MCP calls
+    mcp_max_tool_iterations: int = 6  # discovery-first grounding loop budget (Model-B)
 
     # --- Retrieval / grounding ---
     vector_index_endpoint: str = "REPLACE_ME"
