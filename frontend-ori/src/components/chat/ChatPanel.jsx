@@ -106,13 +106,31 @@ export default function ChatPanel({ agent }) {
   const updateSession = (id, updater) =>
     setSessions((prev) => prev.map((s) => (s.id === id ? updater(s) : s)))
 
-  const respondTo = async (id, text) => {
+  // Turn the session's rendered messages into conversation memory the backend
+  // can replay (role/content, oldest first). Drops the leading AI greeting and
+  // caps the window so the prompt stays bounded.
+  const MAX_HISTORY_TURNS = 20
+  const toHistory = (messages) => {
+    const turns = []
+    let seenUser = false
+    for (const m of messages || []) {
+      if (m.role === 'user') seenUser = true
+      if (!seenUser) continue // skip the canned greeting before the first user turn
+      const content = (m.text || '').trim()
+      if (!content) continue
+      turns.push({ role: m.role === 'user' ? 'user' : 'assistant', content })
+    }
+    return turns.slice(-MAX_HISTORY_TURNS)
+  }
+
+  const respondTo = async (id, text, history = []) => {
     setTyping(true)
     try {
       const res = await sendChatMessage({
         agent: agent.slug,
         message: text,
         traceId: pendingTrace.current[id],
+        history,
       })
       // Remember the trace_id while a clarification is pending so the next
       // message resumes that run; clear it once the turn is resolved.
@@ -143,6 +161,10 @@ export default function ChatPanel({ agent }) {
     const value = text.trim()
     if (!value || typing) return
     const id = activeId
+    // Capture prior turns BEFORE appending the new user message so the backend
+    // gets the conversation memory that led up to this question.
+    const priorSession = sessions.find((s) => s.id === id) || active
+    const history = toHistory(priorSession?.messages)
     updateSession(id, (s) => ({
       ...s,
       title: s.messages.some((m) => m.role === 'user')
@@ -154,7 +176,7 @@ export default function ChatPanel({ agent }) {
       messages: [...s.messages, { id: uid(), role: 'user', text: value }],
     }))
     setInput('')
-    respondTo(id, value)
+    respondTo(id, value, history)
   }
 
   const onSubmit = (e) => {

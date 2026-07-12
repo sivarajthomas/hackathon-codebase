@@ -10,6 +10,7 @@ end-to-end; each is marked where a real LLM call plugs in.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Optional
 
@@ -32,6 +33,7 @@ from .retrieval import (
 )
 from .schemas import (
     Citation,
+    ChatTurn,
     Complexity,
     DataSource,
     Evidence,
@@ -39,6 +41,30 @@ from .schemas import (
     UserContext,
     Verb,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _history_messages(
+    history: Optional[list["ChatTurn"]], max_turns: int
+) -> list[dict[str, str]]:
+    """Convert prior conversation turns into Gemini `messages` (oldest first).
+
+    Maps the assistant role to Gemini's ``model`` role and keeps only the most
+    recent ``max_turns`` turns so follow-up questions carry earlier context
+    without unbounded prompt growth.
+    """
+    if not history:
+        return []
+    recent = history[-max_turns:] if max_turns > 0 else list(history)
+    messages: list[dict[str, str]] = []
+    for turn in recent:
+        content = (turn.content or "").strip()
+        if not content:
+            continue
+        role = "model" if turn.role == "assistant" else "user"
+        messages.append({"role": role, "content": content})
+    return messages
 
 # Prevent is event-driven (Pub/Sub), so the interactive router never selects it.
 _VERB_KEYWORDS: dict[Verb, tuple[str, ...]] = {
@@ -128,15 +154,20 @@ class ModelA:
         context: dict[str, Any],
         scenario_params: dict[str, Any],
         forced_verb: Optional[Verb] = None,
+        history: Optional[list["ChatTurn"]] = None,
     ) -> RoutingDecision:
         # LLM router: returns {verb, complexity, data_source, missing_params}.
         # Falls back to the heuristics below when no creds are configured or the
-        # call fails.
+        # call fails. Prior turns are prepended so follow-ups ("what else on it?")
+        # inherit the earlier intent.
+        prior = _history_messages(history, self.settings.chat_history_max_turns)
+        if prior:
+            logger.info("Model-A router: including %d prior turn(s) as memory.", len(prior))
         llm = await invoke_llm(
             self.settings,
             model_id=self.settings.router_model_id,
             system=router_system(),
-            messages=[{"role": "user", "content": question}],
+            messages=[*prior, {"role": "user", "content": question}],
             response_schema={
                 "type": "object",
                 "properties": {
@@ -218,6 +249,7 @@ class ModelB:
         decision: RoutingDecision,
         context: dict[str, Any],
         scope: UserContext,
+        history: Optional[list["ChatTurn"]] = None,
     ) -> dict[str, Any]:
         filters = build_metadata_filters(scope, context)
 
@@ -262,7 +294,7 @@ class ModelB:
             # orchestrator agent and avoids the empty-result problem of guessing
             # table names / imposing scope filters with no scope context.
             bq_result = await self._agentic_fetch(
-                question, decision, context, security_scope, contexts, citations
+                question, decision, context, security_scope, contexts, citations, history
             )
 
         consolidated = {
@@ -309,6 +341,7 @@ class ModelB:
         security_scope: dict[str, Any],
         contexts: list[str],
         citations: list[Citation],
+        history: Optional[list["ChatTurn"]] = None,
     ) -> dict[str, Any]:
         """Discovery-first tool-calling grounding (ported from the orchestrator).
 
@@ -334,7 +367,11 @@ class ModelB:
             agent_question = f"{question}\n\nKnown identifiers: {', '.join(hints)}"
 
         result = await gather_evidence(
-            agent_question, decision.chosen_model_id, self.settings
+            agent_question,
+            self.settings.grounding_model_id,
+            self.settings,
+            servers=["bigquery"],
+            history=_history_messages(history, self.settings.chat_history_max_turns),
         )
 
         rows: list[Any] = []
@@ -360,6 +397,11 @@ class ModelB:
 
         # Fall back to the legacy single-shot SQL path only if nothing was gathered.
         if not result.proof:
+            logger.warning(
+                "Agentic grounding produced no proof; falling back to single-shot SQL "
+                "(agent_answer_len=%d).",
+                len(result.answer or ""),
+            )
             query_spec = await self._build_sql(question, decision, context, security_scope)
             legacy = await self.bq_mcp.call_tool("bq_query", query_spec, security_scope)
             legacy_rows = legacy.get("rows")
@@ -464,6 +506,7 @@ class ModelC:
         question: str,
         decision: RoutingDecision,
         grounded: dict[str, Any],
+        history: Optional[list["ChatTurn"]] = None,
     ) -> dict[str, Any]:
         citations = [Citation(**c) for c in grounded.get("citations", [])]
         evidence = [
@@ -479,11 +522,12 @@ class ModelC:
             f"Grounded evidence:\n{grounding_block or '(none)'}\n\n"
             "Answer strictly from the evidence above and return JSON."
         )
+        prior = _history_messages(history, self.settings.chat_history_max_turns)
         llm = await invoke_llm(
             self.settings,
             model_id=self.settings.analysis_model_id,
             system=analysis_system(decision.verb),
-            messages=[{"role": "user", "content": prompt}],
+            messages=[*prior, {"role": "user", "content": prompt}],
             response_schema=self._schema_for(decision.verb),
         )
         draft: dict[str, Any] = llm.get("structured") or {}

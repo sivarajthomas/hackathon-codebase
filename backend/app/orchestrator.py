@@ -88,6 +88,7 @@ class Orchestrator:
             forced_verb=req.verb,
             trigger_source=TriggerSource.DIRECT,
             scenario_params=req.scenario_params,
+            history=req.history,
             channel=req.channel,
             user=req.user,
         )
@@ -228,7 +229,11 @@ class Orchestrator:
         # 3. Model-A: (forced or inferred) verb + complexity routing.
         async with trace.stage("route_model_a"):
             decision = await self.model_a.route(
-                clean_q, context, request.scenario_params, forced_verb=request.forced_verb
+                clean_q,
+                context,
+                request.scenario_params,
+                forced_verb=request.forced_verb,
+                history=request.history,
             )
 
         # 3a. Clarification loop (missing/ambiguous params, esp. Simulate).
@@ -253,7 +258,9 @@ class Orchestrator:
 
         # 4. Model-B: grounding (cache/vector/rerank) + MCP tool use.
         async with trace.stage("ground_fetch_model_b"):
-            grounded = await self.model_b.ground_and_fetch(clean_q, decision, context, scope)
+            grounded = await self.model_b.ground_and_fetch(
+                clean_q, decision, context, scope, history=request.history
+            )
             if decision.verb is Verb.SIMULATE:
                 grounded["scenario"] = request.scenario_params
 
@@ -265,7 +272,9 @@ class Orchestrator:
 
         # 6. Model-C: per-verb structured draft.
         async with trace.stage("analyze_model_c"):
-            raw_output = await self.model_c.analyze(clean_q, decision, grounded)
+            raw_output = await self.model_c.analyze(
+                clean_q, decision, grounded, history=request.history
+            )
 
         # 7. Automated guardrails BEFORE any human sees it.
         async with trace.stage("output_guardrails"):

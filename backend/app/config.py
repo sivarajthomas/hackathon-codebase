@@ -40,7 +40,7 @@ class Settings(BaseSettings):
 
     # --- Vertex AI Gemini models (low -> high with increasing complexity) ---
     router_model_id: str = "gemini-2.5-flash"       # Model-A (intent + complexity)
-    model_easy_id: str = "gemini-2.5-flash-lite"    # Model-B: low  tier (easy)
+    model_easy_id: str = "gemini-2.5-flash"    # Model-B: low  tier (easy)
     model_medium_id: str = "gemini-2.5-flash"       # Model-B: mid  tier (medium)
     model_complex_id: str = "gemini-2.5-pro"        # Model-B: high tier (complex)
     analysis_model_id: str = "gemini-2.5-pro"       # Model-C (analysis + drafting)
@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     mcp_timeout_seconds: float = 30.0
     mcp_use_auth: bool = True  # mint identity tokens for authenticated Cloud Run MCP calls
     mcp_max_tool_iterations: int = 6  # discovery-first grounding loop budget (Model-B)
+    # Model used for the discovery-first grounding loop. Must be capable at
+    # agentic tool-calling — flash-lite is NOT reliable here, so this overrides
+    # the routed complexity tier for grounding.
+    grounding_model_id: str = "gemini-2.5-flash"
+    # Max prior conversation turns fed back to the models for follow-up memory.
+    chat_history_max_turns: int = 20
 
     # --- Retrieval / grounding ---
     vector_index_endpoint: str = "REPLACE_ME"

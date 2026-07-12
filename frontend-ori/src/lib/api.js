@@ -16,12 +16,13 @@ const url = (path) => `${API_BASE}${path}`
  * @param {string} params.message Free-text user message
  * @param {string} [params.invoiceNumber] Optional explicit invoice number
  * @param {string} [params.traceId] Set to resume a pending clarification turn
+ * @param {Array<{role: string, content: string}>} [params.history] Prior turns (oldest first)
  * @param {AbortSignal} [params.signal]    Optional abort signal
  * @returns {Promise<{reply: string, status: string, verb: string|null,
  *                     requiresHumanReview: boolean, traceId: string,
  *                     output: object|null}>}
  */
-export async function sendChatMessage({ agent, message, invoiceNumber, traceId, signal } = {}) {
+export async function sendChatMessage({ agent, message, invoiceNumber, traceId, history, signal } = {}) {
   const res = await fetch(url('/v1/chat'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -30,6 +31,7 @@ export async function sendChatMessage({ agent, message, invoiceNumber, traceId, 
       message,
       ...(invoiceNumber ? { invoice_number: invoiceNumber } : {}),
       ...(traceId ? { trace_id: traceId } : {}),
+      ...(history && history.length ? { history } : {}),
     }),
     signal,
   })
