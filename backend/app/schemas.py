@@ -107,6 +107,15 @@ class UserContext(BaseModel):
     currency: Optional[str] = None
 
 
+class ChatTurn(BaseModel):
+    """A single prior turn in the conversation, used to give the models memory."""
+
+    role: Literal["user", "assistant"] = Field(
+        ..., description="Who produced the message: the user or the assistant."
+    )
+    content: str = Field(..., description="The natural-language text of the turn.")
+
+
 class ProcessRequest(BaseModel):
     user_question: str
     finding_id: Optional[str] = None
@@ -115,6 +124,7 @@ class ProcessRequest(BaseModel):
     forced_verb: Optional[Verb] = None                             # set when the agent is chosen
     trigger_source: TriggerSource = TriggerSource.AUTO
     scenario_params: dict[str, Any] = Field(default_factory=dict)  # Simulate what-ifs
+    history: list["ChatTurn"] = Field(default_factory=list)         # prior turns (oldest first)
     channel: Channel = Channel.CS
     user: UserContext
 
@@ -133,6 +143,7 @@ class AgentRunRequest(BaseModel):
     user_question: str = ""
     as_of_date: Optional[date] = None
     scenario_params: dict[str, Any] = Field(default_factory=dict)
+    history: list["ChatTurn"] = Field(default_factory=list)
     channel: Channel = Channel.CS
     user: UserContext
 
@@ -199,6 +210,7 @@ class ChatRequest(BaseModel):
     invoice_number: Optional[str] = None
     as_of_date: Optional[date] = None
     scenario_params: dict[str, Any] = Field(default_factory=dict)
+    history: list["ChatTurn"] = Field(default_factory=list)  # prior turns (oldest first)
     trace_id: Optional[str] = None  # set to resume a pending clarification
     channel: "Channel" = Channel.CS
     user: Optional[UserContext] = None

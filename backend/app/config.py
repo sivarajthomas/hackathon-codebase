@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     # agentic tool-calling — flash-lite is NOT reliable here, so this overrides
     # the routed complexity tier for grounding.
     grounding_model_id: str = "gemini-2.5-flash"
+    # Max prior conversation turns fed back to the models for follow-up memory.
+    chat_history_max_turns: int = 20
 
     # --- Retrieval / grounding ---
     vector_index_endpoint: str = "REPLACE_ME"

@@ -29,7 +29,9 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_INSTRUCTION = """\
 You are an enterprise billing data assistant. Answer the user's question using
-ONLY the tools provided and the data they return.
+ONLY the tools provided and the data they return. Use ONLY the tools that are
+present in this session — never assume or request a tool that is not listed, and
+never answer from prior knowledge without calling a tool.
 
 The user speaks in BUSINESS terms (invoices, charges, shipments, carriers,
 taxes, surcharges, rate cards, contracts). They will almost NEVER give you exact
@@ -256,11 +258,43 @@ def _function_calls(content: Any) -> list[Any]:
     return [p.function_call for p in parts if getattr(p, "function_call", None)]
 
 
-def _targets(settings: Settings) -> list[_Target]:
+def _summarize_result(result: Any) -> str:
+    """One-line summary of a tool result for logs (row count / length / error)."""
+    if isinstance(result, dict) and "error" in result:
+        return f"error: {str(result['error'])[:200]}"
+    if isinstance(result, list):
+        return f"list[{len(result)}] rows"
+    if isinstance(result, dict):
+        return f"dict(keys={list(result.keys())[:8]})"
+    text = str(result)
+    return f"{text[:200]} (len={len(text)})"
+
+
+def _log_tool_result(tool: str, server: str, result: Any, is_error: bool) -> None:
+    if is_error:
+        logger.warning(
+            "Grounding agent: tool %s/%s ERROR -> %s",
+            server, tool, _summarize_result(result),
+        )
+    else:
+        logger.info(
+            "Grounding agent: tool %s/%s OK -> %s",
+            server, tool, _summarize_result(result),
+        )
+
+
+def _targets(settings: Settings, servers: Optional[list[str]] = None) -> list[_Target]:
+    """Return the configured MCP endpoints, optionally restricted to ``servers``.
+
+    Restricting to a single server is what makes MCP selection *strict*: a
+    structured-data question only ever sees the BigQuery tools, so the in-loop
+    model cannot wander off to a document/invoice tool on the wrong server.
+    """
+    allowed = set(servers) if servers else None
     out: list[_Target] = []
-    if _configured(settings.bigquery_mcp_url):
+    if (allowed is None or "bigquery" in allowed) and _configured(settings.bigquery_mcp_url):
         out.append(_Target("bigquery", _mcp_endpoint(settings.bigquery_mcp_url)))
-    if _configured(settings.gcs_mcp_url):
+    if (allowed is None or "gcs" in allowed) and _configured(settings.gcs_mcp_url):
         out.append(_Target("gcs", _mcp_endpoint(settings.gcs_mcp_url)))
     return out
 
@@ -269,23 +303,34 @@ async def gather_evidence(
     question: str,
     model_id: str,
     settings: Settings,
+    servers: Optional[list[str]] = None,
+    history: Optional[list[dict[str, str]]] = None,
 ) -> GroundingResult:
     """Run the discovery-first tool-calling loop and return answer + proof.
 
-    Advertises every reachable MCP tool to Gemini and lets it explore the schema
-    before querying, exactly like the orchestrator agent. Returns the collected
-    tool results as evidence for the downstream Model-C draft + guardrails.
+    Advertises the reachable MCP tools of the selected ``servers`` to Gemini and
+    lets it explore the schema before querying, exactly like the orchestrator
+    agent. When ``servers`` is given (e.g. ``["bigquery"]``) ONLY those servers
+    are connected, so tool selection is strict. Returns the collected tool
+    results as evidence for the downstream Model-C draft + guardrails.
     """
     from google.genai import types
 
-    targets = _targets(settings)
+    targets = _targets(settings, servers)
     if not targets:
+        logger.warning(
+            "Grounding agent: no MCP targets for servers=%s; nothing to ground on.", servers
+        )
         return GroundingResult(answer="", proof=[])
 
     if settings.gcp_project_id in ("", "REPLACE_ME"):
         # Vertex AI not configured (local/dev) -> let the caller fall back.
         return GroundingResult(answer="", proof=[])
 
+    logger.info(
+        "Grounding agent: starting for servers=%s (targets=%s), model=%s",
+        servers or "all", [t.key for t in targets], model_id,
+    )
     client = _get_client(settings.gcp_project_id, settings.gcp_location)
     proof: list[ProofItem] = []
 
@@ -306,7 +351,22 @@ async def gather_evidence(
         )
 
         tools = hub.tools()
-        contents = [types.Content(role="user", parts=[types.Part.from_text(text=question)])]
+        contents: list[Any] = []
+        for turn in history or []:
+            text = (turn.get("content") or "").strip()
+            if not text:
+                continue
+            role = "model" if turn.get("role") == "model" else "user"
+            contents.append(
+                types.Content(role=role, parts=[types.Part.from_text(text=text)])
+            )
+        if contents:
+            logger.info(
+                "Grounding agent: seeding %d prior turn(s) as memory.", len(contents)
+            )
+        contents.append(
+            types.Content(role="user", parts=[types.Part.from_text(text=question)])
+        )
         config = types.GenerateContentConfig(
             system_instruction=_SYSTEM_INSTRUCTION,
             temperature=0.0,
@@ -347,7 +407,19 @@ async def gather_evidence(
             response_parts: list[Any] = []
             for call in calls:
                 arguments: dict[str, Any] = dict(call.args or {})
+                # Surface the actual query/identifiers being run for debugging.
+                if arguments.get("sql"):
+                    logger.info(
+                        "Grounding agent: executing %s SQL: %s",
+                        call.name, str(arguments["sql"])[:1000],
+                    )
+                elif arguments:
+                    logger.info(
+                        "Grounding agent: calling %s args=%s",
+                        call.name, str(arguments)[:500],
+                    )
                 server_key, result, is_error = await hub.call(call.name, arguments)
+                _log_tool_result(call.name, server_key, result, is_error)
                 proof.append(
                     ProofItem(
                         server=server_key,

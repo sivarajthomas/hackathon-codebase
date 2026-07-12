@@ -55,6 +55,19 @@ def _extract_invoice(text: str) -> Optional[str]:
     return match.group(1).upper() if match else None
 
 
+def _invoice_from_history(history) -> Optional[str]:
+    """Recover the most recently mentioned invoice from prior turns.
+
+    Lets follow-up questions that don't restate the id (e.g. "what else on it?")
+    resolve against the invoice discussed earlier in the session.
+    """
+    for turn in reversed(history or []):
+        found = _extract_invoice(getattr(turn, "content", "") or "")
+        if found:
+            return found
+    return None
+
+
 def _parse_scenario(text: str) -> dict:
     """Best-effort extraction of Simulate scenario parameters from free text."""
     params: dict = {}
@@ -176,6 +189,7 @@ async def run_chat(orch: Orchestrator, req: ChatRequest) -> ChatResponse:
 
     verb = _SLUG_TO_VERB.get((req.agent or "").lower())
     invoice = req.invoice_number or _extract_invoice(req.message)
+    invoice = invoice or _invoice_from_history(req.history)
     invoice = invoice or orch.settings.default_chat_invoice
 
     # For Simulate, derive scenario params from the message so a well-formed
@@ -192,6 +206,7 @@ async def run_chat(orch: Orchestrator, req: ChatRequest) -> ChatResponse:
             user_question=req.message,
             as_of_date=req.as_of_date,
             scenario_params=scenario_params,
+            history=req.history,
             channel=req.channel,
             user=user,
         )
@@ -206,6 +221,7 @@ async def run_chat(orch: Orchestrator, req: ChatRequest) -> ChatResponse:
             forced_verb=verb,
             trigger_source=TriggerSource.DIRECT,
             scenario_params=scenario_params,
+            history=req.history,
             channel=req.channel,
             user=user,
         )
