@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .config import Settings
-from .mcp_clients import BigQueryMCPClient
+from .mcp_clients import BigQueryMCPClient, MCPError
 from .schemas import FindingStatus, PreventFinding, UserContext
 
 logger = logging.getLogger(__name__)
@@ -170,6 +170,12 @@ class GCPClients:
             "currency": scope.currency,
         }
         result = await self.bq_mcp.call_tool("bq_query", {"sql": sql}, security_scope)
+        # ``call_tool`` fails soft and returns a placeholder carrying a ``note``
+        # key when the MCP call errored (auth/network/SQL). Distinguish that from
+        # a genuinely empty result set so callers don't mistake a failure for
+        # "no rows" (which previously surfaced as a misleading 404).
+        if isinstance(result, dict) and result.get("note"):
+            raise MCPError(f"BigQuery MCP call failed for SQL: {sql[:200]}")
         rows = result.get("rows") if isinstance(result, dict) else result
         return rows if isinstance(rows, list) else []
 
@@ -237,7 +243,9 @@ class GCPClients:
     ) -> Optional[dict[str, Any]]:
         """Mark a flagged invoice as reviewed/processed in the BigQuery findings store.
 
-        Returns the reviewed finding summary, or None if it does not exist.
+        Reads the row first (to confirm it exists and to learn the ``Processed``
+        column type), then runs a type-correct UPDATE. Returns the reviewed
+        finding summary, or None if it does not exist.
         """
         if not _SAFE_ID_RE.match(finding_id or ""):
             raise ValueError("Invalid finding id.")
@@ -246,29 +254,34 @@ class GCPClients:
             f = await self.mark_finding_processed(finding_id, reviewer_id, status)
             return self._finding_to_flagged(f) if f is not None else None
 
+        scope = UserContext(user_id=reviewer_id, roles=["cs"])
         status_label = status.value.upper()
-        update_sql = (
-            f"UPDATE {self._findings_table()} "
-            f"SET Processed = TRUE, Status = '{status_label}' "
-            f"WHERE FindingID = '{finding_id}'"
-        )
-        try:
-            await self._run_sql(update_sql, UserContext(user_id=reviewer_id, roles=["cs"]))
-        except Exception as exc:  # pragma: no cover
-            logger.warning("Flagged-invoice review update failed: %s", exc)
-            raise
 
-        # Read back the updated row so the UI can confirm the new state.
-        read_sql = (
+        # 1. Read the row first. This both confirms existence (so a missing id is
+        #    a real 404) and reveals the ``Processed`` column type — CSV-loaded
+        #    tables may store it as STRING ("TRUE") or BOOL, and the UPDATE literal
+        #    must match or BigQuery rejects the DML.
+        select_sql = (
             "SELECT FindingID, InvoiceNumber, ShipmentID, ContractNumber, "
             "LeakageType, LeakageAmount, RootCause, Recommendation, Severity, "
             "Status, Processed, CreatedAt "
             f"FROM {self._findings_table()} WHERE FindingID = '{finding_id}' LIMIT 1"
         )
-        rows = await self._run_sql(read_sql, UserContext(user_id=reviewer_id, roles=["cs"]))
+        rows = await self._run_sql(select_sql, scope)
         if not rows:
             return None
         row = rows[0]
+
+        # 2. Update with a literal that matches the column type.
+        processed_literal = "TRUE" if isinstance(row.get("Processed"), bool) else "'TRUE'"
+        update_sql = (
+            f"UPDATE {self._findings_table()} "
+            f"SET Processed = {processed_literal}, Status = '{status_label}' "
+            f"WHERE FindingID = '{finding_id}'"
+        )
+        await self._run_sql(update_sql, scope)
+
+        # 3. Return the row with the new reviewed state (no readback needed).
         return {
             "finding_id": str(row.get("FindingID") or finding_id),
             "invoice_number": row.get("InvoiceNumber"),
@@ -279,8 +292,8 @@ class GCPClients:
             "severity": self._severity(row.get("Severity")),
             "root_cause": row.get("RootCause"),
             "recommendation": row.get("Recommendation"),
-            "status": str(row.get("Status") or status_label),
-            "processed": str(row.get("Processed")).strip().lower() == "true",
+            "status": status_label,
+            "processed": True,
             "created_at": str(row.get("CreatedAt")) if row.get("CreatedAt") else None,
         }
 

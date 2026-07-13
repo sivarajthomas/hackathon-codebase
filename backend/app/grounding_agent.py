@@ -87,6 +87,86 @@ structured figures.
 )
 
 
+# Concrete data dictionary for the billing warehouse. Advertised to the model as
+# a MAP (starting point) — it must still confirm exact names/types with
+# `get_table_info` before querying, but this removes the guesswork about which
+# tables exist and, crucially, WHICH KEYS TO JOIN ON. ``{dataset}`` is replaced
+# at runtime with the configured BigQuery dataset id.
+_SCHEMA_MAP = """\
+SCHEMA MAP (dataset `{dataset}` — verify exact column names/types with
+`get_table_info` before querying; all tables live in this one dataset):
+
+Core billing tables and their PRIMARY / JOIN keys:
+- `invoice_records`  — raw invoice charges. Keys: InvoiceNumber (PK), ShipmentID.
+   Columns: InvoiceDate, FreightCharge, FuelSurcharge, OtherSurcharge,
+   InsuranceCharge, DiscountAmount, TaxAmount, TotalInvoiceAmount.
+- `shipment_transactions` — shipment/weight facts. Keys: ShipmentID (PK),
+   ContractNumber, ItemID, InvoiceNumber. Columns: ShipmentDate, Origin,
+   Destination, BookedWeightKg, MeasuredWeightKg, VolumetricWeightKg,
+   BillableWeightKg, ModeOfTransport, ShipmentValueINR, RemoteAreaFlag,
+   ExpressFlag, HazardousFlag.
+- `analyzed_data` — expected-vs-billed leakage analysis (already computed).
+   Keys: InvoiceNumber, ShipmentID, ContractNumber. Columns: BillableWeightKg,
+   Expected/Billed Freight, FuelSurcharge, Surcharges, Insurance, Total,
+   LeakageAmount, LeakageType, AnomalyFlag, Severity, AnalyzedDate.
+- `findings_store` — flagged leakage findings for CS. Keys: FindingID (PK),
+   InvoiceNumber, ShipmentID, ContractNumber. Columns: LeakageType,
+   LeakageAmount, RootCause, Recommendation, Severity, Status, Processed,
+   CreatedAt.
+- `audit_exception_table` — detected exceptions. Keys: ExceptionID (PK),
+   ShipmentID, InvoiceNumber. Columns: ExceptionType, ExpectedAmount,
+   BilledAmount, LeakageAmount, LeakageReason, DetectedDate.
+
+Reference / master tables:
+- `contract_master` — ContractNumber (PK), CustomerID, CustomerName, dates,
+   PaymentTerms.
+- `contracted_items` — ItemID (PK), dimensions (LengthCm/WidthCm/HeightCm),
+   ActualWeightKg, ShipmentValueINR, TransportMode.
+- `carrier_costs` — ShipmentID (join), CarrierName, ActualTransportationCost,
+   FuelCost, HandlingCost, TotalCost.
+- `transport_rates` — TransportMode (PK), BaseRatePerKg, FuelSurchargePercent.
+- `surcharge_rates` — SurchargeType (PK), Basis, Rate.
+- `zone_master` — ZoneID (PK), OriginCity, DestinationCity, Zone, DistanceKM,
+   RemoteAreaFlag.
+- `rate_revision_history` — ContractNumber + TransportMode + EffectiveFrom/To,
+   OldRate, NewRate.
+- `dispute_cases` — DisputeID (PK), InvoiceNumber, DisputeReason, ClaimType,
+   DisputedAmount, Status, ResolutionAction, CreditNoteAmount, ResolvedDate.
+- `credit_notes` — CreditNoteID (PK), InvoiceNumber, DisputeID, CreditAmount,
+   Reason, IssuedDate.
+
+CANONICAL JOIN KEYS (use these exact columns to JOIN):
+- InvoiceNumber ties invoice_records ↔ shipment_transactions ↔ analyzed_data ↔
+  findings_store ↔ audit_exception_table ↔ dispute_cases ↔ credit_notes.
+- ShipmentID ties shipment_transactions ↔ invoice_records ↔ carrier_costs ↔
+  analyzed_data ↔ audit_exception_table.
+- ContractNumber ties shipment_transactions ↔ contract_master ↔ analyzed_data ↔
+  findings_store ↔ rate_revision_history.
+- ItemID ties shipment_transactions ↔ contracted_items.
+- ModeOfTransport / TransportMode ties shipments/items ↔ transport_rates and
+  rate_revision_history.
+- DisputeID ties dispute_cases ↔ credit_notes.
+
+GUIDANCE:
+- To explain an invoice's charges, start at `invoice_records` (by InvoiceNumber),
+  join `shipment_transactions` (ShipmentID) for weights/route, and consult
+  `transport_rates`/`surcharge_rates` for the rate basis.
+- For "why was this flagged / leakage" questions use `findings_store` or
+  `analyzed_data` (they already hold LeakageType/LeakageAmount/RootCause).
+- For disputes/credits, join `dispute_cases` and `credit_notes` on InvoiceNumber.
+- Match the user's invoice/shipment reference against the real key even if the
+  format differs slightly; if an exact match returns nothing, preview a few rows
+  to learn the actual id format.
+"""
+
+
+def _compose_system_instruction(settings: Settings, include_docs: bool) -> str:
+    """Build the grounding system prompt with the concrete schema map injected."""
+    base = _SYSTEM_INSTRUCTION if include_docs else _SYSTEM_INSTRUCTION_NO_DOCS
+    dataset = settings.bigquery_dataset or "the billing dataset"
+    return f"{base}\n\n{_SCHEMA_MAP.format(dataset=dataset)}"
+
+
 # --------------------------------------------------------------------------- #
 # JSON-Schema -> Gemini function declaration (ported from schema_convert.py)
 # --------------------------------------------------------------------------- #
@@ -381,10 +461,8 @@ async def gather_evidence(
             types.Content(role="user", parts=[types.Part.from_text(text=question)])
         )
         config = types.GenerateContentConfig(
-            system_instruction=(
-                _SYSTEM_INSTRUCTION
-                if "gcs" in hub._sessions
-                else _SYSTEM_INSTRUCTION_NO_DOCS
+            system_instruction=_compose_system_instruction(
+                settings, include_docs="gcs" in hub._sessions
             ),
             temperature=0.0,
             tools=tools or None,
