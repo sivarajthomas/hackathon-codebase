@@ -8,6 +8,7 @@ any pipeline business logic.
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from typing import Optional
@@ -27,6 +28,8 @@ from .schemas import (
     UserContext,
     Verb,
 )
+
+logger = logging.getLogger(__name__)
 
 # Map the frontend agent slugs to pipeline verbs.
 _SLUG_TO_VERB: dict[str, Verb] = {
@@ -183,6 +186,14 @@ async def run_chat(orch: Orchestrator, req: ChatRequest) -> ChatResponse:
     """
     user = req.user or UserContext(user_id="demo-user", roles=["cs"])
 
+    logger.info(
+        "run_chat agent=%s invoice=%s trace=%s user_id=%s",
+        (req.agent or "-").lower(),
+        req.invoice_number or "-",
+        req.trace_id or "-",
+        user.user_id,
+    )
+
     # Resume a pending clarification (e.g. Simulate awaiting scenario params).
     if req.trace_id:
         scenario = req.scenario_params or _parse_scenario(req.message) or {"response": req.message}
@@ -307,6 +318,9 @@ def _extract_evidence(verb: Optional[Verb], output: dict) -> list[EvidenceItem]:
                 source_system=(citation.get("source_type") or "BigQuery").upper()
                 if citation.get("source_type") in {"bigquery", "gcs"}
                 else "BigQuery",
+                tool=citation.get("tool"),
+                query=citation.get("query"),
+                tables=citation.get("tables") or [],
             )
         )
 
@@ -314,16 +328,20 @@ def _extract_evidence(verb: Optional[Verb], output: dict) -> list[EvidenceItem]:
         if not isinstance(ev, dict):
             continue
         citation = ev.get("citation") or {}
+        cit = citation if isinstance(citation, dict) else {}
         items.append(
             EvidenceItem(
-                source_object=(citation.get("source_type") if isinstance(citation, dict) else None)
+                source_object=(cit.get("source_type"))
                 or ev.get("label")
                 or "evidence",
-                record_id=citation.get("source_id") if isinstance(citation, dict) else None,
+                record_id=cit.get("source_id"),
                 retrieved_fields=[ev["label"]] if ev.get("label") else [],
                 confidence=100.0,
                 snippet=str(ev.get("value")) if ev.get("value") is not None else None,
-                locator=citation.get("locator") if isinstance(citation, dict) else None,
+                locator=cit.get("locator"),
+                tool=cit.get("tool"),
+                query=cit.get("query"),
+                tables=cit.get("tables") or [],
             )
         )
 

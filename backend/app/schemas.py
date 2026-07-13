@@ -285,6 +285,9 @@ class EvidenceItem(BaseModel):
     source_system: str = "BigQuery"          # BigQuery | GCS | SAP | contract
     snippet: Optional[str] = None
     locator: Optional[str] = None            # uri / row key / page#section
+    tool: Optional[str] = None               # MCP tool used, e.g. "bigquery:execute_sql"
+    query: Optional[str] = None              # exact SQL / tool arguments that produced this
+    tables: list[str] = Field(default_factory=list)  # BQ tables or gcs bucket/object touched
 
 
 # --------------------------------------------------------------------------- #
@@ -431,6 +434,9 @@ class Citation(BaseModel):
     locator: str              # uri, row key, page/section
     snippet: str
     score: float = 0.0
+    tool: Optional[str] = None       # MCP tool used, e.g. "bigquery:execute_sql"
+    query: Optional[str] = None      # exact SQL / tool arguments that produced this
+    tables: list[str] = Field(default_factory=list)  # BQ tables or gcs bucket/object touched
 
 
 class Evidence(BaseModel):

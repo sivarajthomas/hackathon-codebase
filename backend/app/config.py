@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # --- App ---
     app_name: str = "Invoice Processing SaaS"
     environment: str = "dev"
+    # Root log level (DEBUG|INFO|WARNING|ERROR). On Cloud Run logs are emitted as
+    # structured JSON (severity-aware) to stdout; locally as readable text.
+    log_level: str = "INFO"
 
     # --- HTTP / frontend integration ---
     # Comma-separated list of browser origins allowed to call the API (CORS).

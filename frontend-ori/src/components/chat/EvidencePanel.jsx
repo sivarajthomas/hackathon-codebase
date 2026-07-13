@@ -70,6 +70,18 @@ export default function EvidencePanel({ evidence, accent = '#2b1810' }) {
                     </div>
                     {ev.last_updated && <Row label="Last Updated" value={formatDate(ev.last_updated)} />}
                     <Row label="Source System" value={ev.source_system || 'BigQuery'} />
+                    {ev.tool && <Row label="Tool" value={ev.tool} mono />}
+                    {ev.tables?.length > 0 && (
+                      <Row label={ev.source_system === 'GCS' ? 'Bucket / Object' : 'Tables'} value={ev.tables.join(', ')} mono />
+                    )}
+                    {ev.query && (
+                      <div className="mt-1.5">
+                        <span className="text-brand-brown/50">Query</span>
+                        <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded bg-brand-brown/[0.06] px-2 py-1 font-mono text-[10px] leading-relaxed text-brand-brown/70">
+                          {ev.query}
+                        </pre>
+                      </div>
+                    )}
                     {ev.snippet && (
                       <p className="mt-1.5 rounded bg-brand-brown/[0.04] px-2 py-1 font-mono text-[10px] text-brand-brown/60">
                         {ev.snippet}

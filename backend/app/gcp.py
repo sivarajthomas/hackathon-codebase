@@ -680,7 +680,10 @@ class GCPClients:
             job = self._bq_client().query(sql, job_config=job_config)
             return [dict(row) for row in job.result()]
 
-        return await asyncio.to_thread(_run)
+        logger.info("BigQuery query: %s", " ".join(sql.split())[:500])
+        rows = await asyncio.to_thread(_run)
+        logger.info("BigQuery query returned %d row(s)", len(rows))
+        return rows
 
     @staticmethod
     def _severity(value: Any) -> str:

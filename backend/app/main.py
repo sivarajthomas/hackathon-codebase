@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from .logging_setup import configure_logging
 from .auth import (
     allowed_agents_for,
     channel_for,
@@ -64,7 +66,13 @@ from .schemas import (
     UserContext,
 )
 
+# Configure logging as early as possible so every module's INFO logs surface
+# in Cloud Run (stdout, severity-aware JSON on Cloud Run; readable text locally).
+configure_logging(get_settings().log_level)
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Invoice Processing SaaS", version="0.1.0")
+logger.info("Starting %s", "Invoice Processing SaaS API")
 
 # Allow the browser-based frontend (a separate Cloud Run service / origin) to
 # call this API. Origins are configurable via CORS_ALLOW_ORIGINS (comma-list).
@@ -118,6 +126,13 @@ async def chat(
     Anonymous/legacy callers behave exactly as before.
     """
     agent_slug = (body.agent or "").lower()
+    logger.info(
+        "POST /v1/chat agent=%s invoice=%s conversation=%s authenticated=%s",
+        agent_slug or "-",
+        body.invoice_number or "-",
+        body.conversation_id or "-",
+        user is not None,
+    )
 
     if user is not None:
         # Role-based agent visibility: customers must not use the Prevent agent.
@@ -131,6 +146,12 @@ async def chat(
         body.channel = channel_for(user)
 
     resp = await run_chat(orch, body)
+    logger.info(
+        "POST /v1/chat done trace=%s status=%s evidence=%d",
+        resp.trace_id,
+        resp.status.value,
+        len(resp.evidence or []),
+    )
 
     # Persist the turn to the conversation history (authenticated callers only).
     if user is not None:
@@ -187,8 +208,14 @@ async def login(
 ) -> LoginResponse:
     record = await orch.gcp.get_user_by_username(body.username)
     if record is None or not verify_password(body.password, record["password_hash"]):
+        logger.warning("POST /v1/auth/login failed for username=%s", body.username)
         raise HTTPException(status_code=401, detail="Invalid username or password.")
     token = issue_token(record, settings)
+    logger.info(
+        "POST /v1/auth/login ok user_id=%s role=%s",
+        record["user_id"],
+        record["primary_role"].value,
+    )
     await orch.gcp.write_audit_log(
         {
             "actor_user_id": record["user_id"],
@@ -395,7 +422,13 @@ async def prevent_pubsub(
         # Fall back to Pub/Sub message attributes.
         payload = PreventPayload(**dict(envelope.message.attributes))
 
+    logger.info("POST /v1/prevent/pubsub invoice=%s", getattr(payload, "invoice_number", "-"))
     finding = await orch.handle_prevent_event(payload)
+    logger.info(
+        "POST /v1/prevent/pubsub done finding_id=%s status=%s",
+        finding.finding_id,
+        finding.status.value,
+    )
     return {"finding_id": finding.finding_id, "status": finding.status.value}
 
 

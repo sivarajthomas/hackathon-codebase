@@ -10,6 +10,7 @@ end-to-end; each is marked where a real LLM call plugs in.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Optional
@@ -65,6 +66,55 @@ def _history_messages(
         role = "model" if turn.role == "assistant" else "user"
         messages.append({"role": role, "content": content})
     return messages
+
+
+# Matches the table reference after FROM / JOIN, including backtick-quoted
+# fully-qualified names like `project.dataset.table` and bare `dataset.table`.
+_SQL_TABLE_RE = re.compile(
+    r"\b(?:from|join)\s+(`[^`]+`|[A-Za-z_][\w.$]*)",
+    re.IGNORECASE,
+)
+
+
+def _sql_tables(sql: Optional[str]) -> list[str]:
+    """Best-effort extraction of the table names referenced by a SQL statement."""
+    if not sql:
+        return []
+    seen: list[str] = []
+    for match in _SQL_TABLE_RE.findall(sql):
+        name = match.strip().strip("`")
+        if name and name.lower() not in {"select", "unnest"} and name not in seen:
+            seen.append(name)
+    return seen
+
+
+def _describe_proof(item: Any) -> dict[str, Any]:
+    """Derive (tool, query, tables, locator) traceability from an MCP proof item.
+
+    - For BigQuery ``execute_sql`` the query is the SQL and the tables/locator are
+      parsed from it.
+    - For GCS tools the bucket/object arguments become the locator + "tables".
+    - Otherwise the raw tool arguments are surfaced as the query.
+    """
+    args = item.arguments if isinstance(item.arguments, dict) else {}
+    tool = f"{item.server}:{item.tool}"
+    sql = args.get("sql") or args.get("query")
+    if sql:
+        tables = _sql_tables(sql)
+        locator = tables[0] if tables else item.server
+        return {"tool": tool, "query": str(sql), "tables": tables, "locator": locator}
+
+    # GCS-style bucket/object references.
+    bucket = args.get("bucket") or args.get("bucket_name")
+    obj = args.get("object") or args.get("object_name") or args.get("path") or args.get("key")
+    if bucket or obj:
+        locator = f"gcs://{bucket or ''}/{obj or ''}".rstrip("/")
+        tables = [t for t in (bucket, obj) if t]
+        return {"tool": tool, "query": json.dumps(args, default=str), "tables": tables, "locator": locator}
+
+    query = json.dumps(args, default=str) if args else None
+    return {"tool": tool, "query": query, "tables": [], "locator": tool}
+
 
 # Prevent is event-driven (Pub/Sub), so the interactive router never selects it.
 _VERB_KEYWORDS: dict[Verb, tuple[str, ...]] = {
@@ -505,13 +555,17 @@ class ModelB:
                 continue
             snippet = str(item.result)[:800]
             contexts.append(f"{item.server}:{item.tool}:{snippet}")
+            trace = _describe_proof(item)
             citations.append(
                 Citation(
                     source_id=f"{item.server}:{item.tool}",
                     source_type=item.server,
-                    locator=f"{item.server}:{item.tool}",
+                    locator=trace["locator"],
                     snippet=snippet[:500],
                     score=1.0,
+                    tool=trace["tool"],
+                    query=trace["query"],
+                    tables=trace["tables"],
                 )
             )
             if item.tool.endswith("execute_sql") or item.tool == "execute_sql":
@@ -531,6 +585,8 @@ class ModelB:
             legacy = await self.bq_mcp.call_tool("bq_query", query_spec, security_scope)
             legacy_rows = legacy.get("rows")
             if legacy_rows:
+                legacy_sql = query_spec.get("sql") if isinstance(query_spec, dict) else None
+                legacy_tables = _sql_tables(legacy_sql)
                 contexts.append(f"bigquery:{legacy_rows}")
                 citations.append(
                     Citation(
@@ -539,6 +595,9 @@ class ModelB:
                         locator=self.settings.bigquery_dataset or "bigquery",
                         snippet=str(legacy_rows)[:500],
                         score=1.0,
+                        tool="bigquery:bq_query",
+                        query=str(legacy_sql) if legacy_sql else None,
+                        tables=legacy_tables,
                     )
                 )
             return legacy

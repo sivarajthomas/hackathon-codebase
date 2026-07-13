@@ -16,6 +16,7 @@ Stages (each traced):
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Optional
 
@@ -57,6 +58,8 @@ from .prevent import PreventAgent
 from . import store
 from .store import PendingState
 from .telemetry import Trace
+
+logger = logging.getLogger(__name__)
 
 
 class Orchestrator:
@@ -238,6 +241,14 @@ class Orchestrator:
     async def _execute(self, request: ProcessRequest, trace: Trace) -> ProcessResponse:
         settings = self.settings
         scope = request.user
+        logger.info(
+            "pipeline start trace=%s invoice=%s finding=%s forced_verb=%s trigger=%s",
+            trace.trace_id,
+            request.invoice_number or "-",
+            request.finding_id or "-",
+            request.forced_verb.value if request.forced_verb else "-",
+            request.trigger_source.value if request.trigger_source else "-",
+        )
 
         # 1. Load Finding/invoice context (row-level scoped).
         async with trace.stage("load_context"):
@@ -260,6 +271,13 @@ class Orchestrator:
                 forced_verb=request.forced_verb,
                 history=request.history,
             )
+        logger.info(
+            "pipeline trace=%s routed verb=%s complexity=%s missing_params=%s",
+            trace.trace_id,
+            decision.verb.value if decision.verb else "-",
+            getattr(decision.complexity, "value", decision.complexity),
+            bool(decision.missing_params),
+        )
 
         # 3a. Clarification loop (missing/ambiguous params, esp. Simulate).
         if decision.missing_params:
@@ -418,6 +436,14 @@ class Orchestrator:
         refusal_reason: Optional[str] = None,
         slo_met: Optional[bool] = None,
     ) -> ProcessResponse:
+        logger.info(
+            "pipeline done trace=%s status=%s verb=%s human_review=%s elapsed=%.3fs",
+            trace.trace_id,
+            status.value,
+            decision.verb.value if decision and decision.verb else "-",
+            requires_human_review,
+            trace.elapsed_seconds,
+        )
         return ProcessResponse(
             trace_id=trace.trace_id,
             status=status,
