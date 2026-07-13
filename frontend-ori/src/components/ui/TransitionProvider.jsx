@@ -47,8 +47,15 @@ export function TransitionProvider({ children }) {
     [navigate]
   )
 
+  // Send the drone in without a page transition (e.g. when switching agents
+  // from the sidebar). No-op if a drone is already flying.
+  const summonDrone = useCallback((color) => {
+    const origin = { x: window.innerWidth / 2, y: 90 }
+    setDrone((prev) => prev || { origin, accent: color })
+  }, [])
+
   return (
-    <TransitionCtx.Provider value={{ launch, registerPrompt }}>
+    <TransitionCtx.Provider value={{ launch, registerPrompt, summonDrone }}>
       {children}
       <AnimatePresence>
         {state && (

@@ -102,25 +102,6 @@ export default function Hero() {
           </svg>
         </MagneticButton>
       </motion.div>
-
-      {/* Scroll cue */}
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ delay: 1.6, duration: 1 }}
-        className="absolute bottom-8 left-1/2 -translate-x-1/2"
-      >
-        <div className="flex flex-col items-center gap-2 text-brand-brown/50">
-          <span className="text-[10px] uppercase tracking-[0.3em]">Scroll</span>
-          <span className="flex h-9 w-5 items-start justify-center rounded-full border border-brand-brown/25 p-1">
-            <motion.span
-              animate={{ y: [0, 10, 0] }}
-              transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
-              className="h-1.5 w-1.5 rounded-full bg-brand-gold"
-            />
-          </span>
-        </div>
-      </motion.div>
     </section>
   )
 }

@@ -275,7 +275,7 @@ function Parcel({ fromX, fromY, dropX, toY, letters, accent }) {
         letters.map((l, i) => (
           <motion.span
             key={i}
-            className="fixed left-0 top-0 select-none font-bold text-black"
+            className="fixed left-0 top-0 select-none font-normal text-black/40"
             style={{ fontSize: 14, whiteSpace: 'pre' }}
             initial={{ x: dropX + 8, y: toY, opacity: 0, scale: 1.6 }}
             animate={{

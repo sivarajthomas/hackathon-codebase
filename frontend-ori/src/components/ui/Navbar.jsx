@@ -1,5 +1,6 @@
 import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
+import IdButton from './IdButton'
 
 // Static, solid site header pinned to the top. The hero video plays as a
 // section beneath it (no longer behind it).
@@ -33,20 +34,13 @@ export default function Navbar() {
             One Invoice Intelligence
           </h1>
           <p className="text-[11px] font-medium text-brand-brown/60 md:text-sm">
-            Moving our world forward by delivering what matters
+            Agentic AI Command Center for Revenue Leakage Detection and Billing Intelligence
           </p>
         </div>
 
         {/* Right: nav actions */}
         <div className="flex shrink-0 items-center gap-2.5">
-          <a
-            href="#agents"
-            onClick={scrollTo('#agents')}
-            className="rounded-full bg-brand-gold px-5 py-2.5 text-xs font-semibold tracking-wide text-brand-brownDeep shadow-glow transition-transform hover:scale-105"
-          
-          >
-            Agents
-          </a>
+          <IdButton />
         </div>
       </div>
     </motion.header>

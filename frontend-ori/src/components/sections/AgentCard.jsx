@@ -43,15 +43,28 @@ export default function AgentCard({ agent, index }) {
       transition={{ duration: 0.8, delay: index * 0.1, ease: [0.22, 1, 0.36, 1] }}
       className="perspective-1000 h-full"
     >
+      {/* Gentle continuous float, slightly out of sync per card. */}
+      <motion.div
+        className="h-full"
+        animate={{ y: [0, -12, 0] }}
+        transition={{
+          duration: 4.5 + index * 0.5,
+          repeat: Infinity,
+          ease: 'easeInOut',
+          delay: index * 0.4,
+        }}
+      >
       <motion.div
         ref={cardRef}
         onMouseMove={handleMove}
         onMouseLeave={reset}
         onClick={handleLaunch}
         data-cursor="hover"
-        className="group preserve-3d relative flex h-full cursor-pointer flex-col rounded-3xl border border-brand-brown/10 bg-white p-8 shadow-[0_10px_40px_-20px_rgba(43,24,16,0.4)] transition-transform duration-200 will-change-transform"
+        className="group preserve-3d relative flex h-full cursor-pointer flex-col overflow-hidden rounded-3xl border border-white/50 p-8 transition-shadow duration-300 will-change-transform"
         style={{
           transform: `rotateX(${tilt.rx}deg) rotateY(${tilt.ry}deg)`,
+          background: `linear-gradient(150deg, #ffffff 0%, ${agent.accentSoft} 58%, ${agent.accent}33 100%)`,
+          boxShadow: `0 18px 50px -20px rgba(43,24,16,0.45), 0 0 55px -6px ${agent.accent}99`,
         }}
         whileHover={{ y: -10 }}
       >
@@ -97,6 +110,7 @@ export default function AgentCard({ agent, index }) {
             </span>
           </div>
         </div>
+      </motion.div>
       </motion.div>
     </motion.div>
   )

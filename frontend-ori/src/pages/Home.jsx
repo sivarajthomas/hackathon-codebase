@@ -13,7 +13,7 @@ export default function Home() {
           ONE INVOICE INTELLIGENCE
         </p>
         <p className="mt-2 text-xs text-brand-brown/50">
-          Moving our world forward by delivering what matters.
+          From Package Processing to Invoice Accuracy — Protecting Every Dollar with Agentic AI.
         </p>
       </footer>
     </main>

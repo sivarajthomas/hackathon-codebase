@@ -4,7 +4,7 @@ export const agents = [
   {
     id: 'explain',
     slug: 'explain',
-    name: 'Explain Agent',
+    name: 'Explain',
     role: 'Billing Analyst',
     tagline: 'Every charge, clearly explained.',
     description:
@@ -31,7 +31,7 @@ export const agents = [
   {
     id: 'resolve',
     slug: 'resolve',
-    name: 'Resolve Agent',
+    name: 'Resolve',
     role: 'Dispute Specialist',
     tagline: 'Disputes closed, fairly and fast.',
     description:
@@ -58,7 +58,7 @@ export const agents = [
   {
     id: 'simulate',
     slug: 'simulate',
-    name: 'Simulate Agent',
+    name: 'Simulate',
     role: 'Pricing Analyst',
     tagline: 'Model every scenario before you ship.',
     description:
@@ -85,7 +85,7 @@ export const agents = [
   {
     id: 'prevent',
     slug: 'prevent',
-    name: 'Prevent Agent',
+    name: 'Prevent',
     role: 'Risk & Compliance',
     tagline: 'Catch errors before they become disputes.',
     description:

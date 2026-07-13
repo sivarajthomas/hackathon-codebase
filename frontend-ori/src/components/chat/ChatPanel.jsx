@@ -34,6 +34,14 @@ const CANNED = {
 let idc = 0
 const uid = () => `${Date.now()}-${idc++}`
 
+// Creative per-agent "thinking" status shown while a reply is generated.
+const THINKING = {
+  explain: 'Decoding the charges…',
+  resolve: 'Untangling the dispute…',
+  simulate: 'Crunching the scenarios…',
+  prevent: 'Sniffing out anomalies…',
+}
+
 const makeSession = (agent) => ({
   id: uid(),
   title: 'New conversation',
@@ -68,13 +76,13 @@ export default function ChatPanel({ agent }) {
 
   // Prompt-box targets the courier drone flies to. The drone (owned by the
   // TransitionProvider) writes its instruction here via `setDroneText`.
-  const { registerPrompt } = useTransition()
+  const { registerPrompt, summonDrone } = useTransition()
   const inputWrapRef = useRef(null)
   const sendBtnRef = useRef(null)
   const [droneText, setDroneText] = useState('')
-  // True while the drone is dropping letters — hides the default placeholder
-  // so it doesn't sit behind the incoming bold text.
-  const [droneWriting, setDroneWriting] = useState(false)
+  // Quick-reference fields shown above the prompt box for every agent.
+  const [invoiceNumber, setInvoiceNumber] = useState('')
+  const [invoiceDate, setInvoiceDate] = useState('')
 
   const active = sessions.find((s) => s.id === activeId) || sessions[0]
 
@@ -88,7 +96,6 @@ export default function ChatPanel({ agent }) {
     pendingTrace.current = {}
     // Clear any previously written instruction; the drone rewrites it.
     setDroneText('')
-    setDroneWriting(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.slug])
 
@@ -114,14 +121,16 @@ export default function ChatPanel({ agent }) {
   }, [agent.slug])
 
   // Register the prompt box + send button so the incoming drone knows where to
-  // fly and where to drop its letters.
+  // fly and where to drop its letters, then summon the drone for this agent.
   useEffect(() => {
     registerPrompt({
       inputEl: inputWrapRef.current,
       sendEl: sendBtnRef.current,
       setPlaceholder: setDroneText,
-      onWriteStart: () => setDroneWriting(true),
     })
+    // Fly the drone in whenever the agent changes (sidebar switch, direct load,
+    // etc.). No-op if a drone is already in flight from a card launch.
+    summonDrone(agent.accent)
     return () => registerPrompt(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.slug])
@@ -189,7 +198,14 @@ export default function ChatPanel({ agent }) {
   const send = (text) => {
     const value = text.trim()
     if (!value || typing) return
+    // Invoice number is required (date stays optional).
+    if (!invoiceNumber.trim()) return
     const id = activeId
+    // Fold in the Invoice number / Date reference fields when provided.
+    const refBits = []
+    if (invoiceNumber.trim()) refBits.push(`Invoice ${invoiceNumber.trim()}`)
+    if (invoiceDate.trim()) refBits.push(`Date ${invoiceDate.trim()}`)
+    const outgoing = refBits.length ? `${refBits.join(' · ')} — ${value}` : value
     // Capture prior turns BEFORE appending the new user message so the backend
     // gets the conversation memory that led up to this question.
     const priorSession = sessions.find((s) => s.id === id) || active
@@ -198,14 +214,16 @@ export default function ChatPanel({ agent }) {
       ...s,
       title: s.messages.some((m) => m.role === 'user')
         ? s.title
-        : value.length > 38
-          ? value.slice(0, 38) + '…'
-          : value,
+        : outgoing.length > 38
+          ? outgoing.slice(0, 38) + '…'
+          : outgoing,
       showPrompts: false,
-      messages: [...s.messages, { id: uid(), role: 'user', text: value }],
+      messages: [...s.messages, { id: uid(), role: 'user', text: outgoing }],
     }))
     setInput('')
-    respondTo(id, value, history)
+    // Clear the drone-written instruction once the user runs their first search.
+    setDroneText('')
+    respondTo(id, outgoing, history)
   }
 
   const onSubmit = (e) => {
@@ -331,7 +349,7 @@ export default function ChatPanel({ agent }) {
           )}
         </div>
       </div>
-      <div className="flex-1 space-y-2 overflow-y-auto p-3">
+      <div className="flex-1 space-y-2 overflow-y-auto p-3" data-lenis-prevent>
         {issuesLoading && (
           <p className="px-2 py-6 text-center text-xs text-brand-brown/40">Loading flagged invoices…</p>
         )}
@@ -437,7 +455,7 @@ export default function ChatPanel({ agent }) {
       </div>
 
       {/* History */}
-      <div className="mt-6 flex-1 overflow-y-auto px-3">
+      <div className="mt-6 flex-1 overflow-y-auto px-3" data-lenis-prevent>
         <div className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-brand-brown/40">Recent</div>
         <div className="space-y-1">
           {sessions.map((s) => (
@@ -572,12 +590,12 @@ export default function ChatPanel({ agent }) {
         </div>
 
         {/* Messages */}
-        <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
+        <div ref={scrollRef} data-lenis-prevent className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
           <div className="mx-auto flex max-w-3xl flex-col gap-5">
             {active?.messages.map((m) => (
               <Message key={m.id} role={m.role} text={m.text} accent={agent.accent} />
             ))}
-            <AnimatePresence>{typing && <TypingIndicator accent={agent.accent} />}</AnimatePresence>
+            <AnimatePresence>{typing && <TypingIndicator accent={agent.accent} label={THINKING[agent.slug] || 'Thinking…'} />}</AnimatePresence>
           </div>
         </div>
 
@@ -599,6 +617,39 @@ export default function ChatPanel({ agent }) {
 
         {/* Input */}
         <form onSubmit={onSubmit} className="px-4 pb-6 pt-2 md:px-8">
+          {/* Quick reference fields */}
+          <div className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-2">
+            <div
+              className="flex items-center gap-2 rounded-xl border px-3 py-1.5 transition-colors"
+              style={{ borderColor: agent.accent, background: agent.accentSoft }}
+            >
+              <label htmlFor="invoiceNumber" className="whitespace-nowrap text-[11px] font-semibold uppercase tracking-wide text-black/60">
+                Invoice #<span className="text-red-500">*</span>
+              </label>
+              <input
+                id="invoiceNumber"
+                value={invoiceNumber}
+                onChange={(e) => setInvoiceNumber(e.target.value)}
+                placeholder="INV-48213"
+                className="w-28 bg-transparent text-sm text-black placeholder:text-black/30 focus:outline-none"
+              />
+            </div>
+            <div
+              className="flex items-center gap-2 rounded-xl border px-3 py-1.5 transition-colors"
+              style={{ borderColor: agent.accent, background: agent.accentSoft }}
+            >
+              <label htmlFor="invoiceDate" className="whitespace-nowrap text-[11px] font-semibold uppercase tracking-wide text-black/60">
+                Date
+              </label>
+              <input
+                id="invoiceDate"
+                type="date"
+                value={invoiceDate}
+                onChange={(e) => setInvoiceDate(e.target.value)}
+                className="bg-transparent text-sm font-normal text-black/50 placeholder:text-black/30 focus:outline-none"
+              />
+            </div>
+          </div>
           <div
             ref={inputWrapRef}
             className="mx-auto flex max-w-3xl items-center gap-2 rounded-2xl border border-brand-brown/15 bg-white px-3 py-2 shadow-sm transition-colors focus-within:border-brand-gold"
@@ -606,17 +657,17 @@ export default function ChatPanel({ agent }) {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={droneText || (droneWriting ? '' : agent.placeholder || `Message ${agent.name}…`)}
+              placeholder={droneText}
               className={`flex-1 bg-transparent px-2 py-2.5 text-sm text-brand-brownDeep focus:outline-none ${
                 droneText
-                  ? 'placeholder:font-bold placeholder:text-black'
+                  ? 'placeholder:font-normal placeholder:text-black/40'
                   : 'placeholder:text-brand-brown/40'
               }`}
             />
             <button
               ref={sendBtnRef}
               type="submit"
-              disabled={!input.trim() || typing}
+              disabled={!input.trim() || !invoiceNumber.trim() || typing}
               className="flex h-10 w-10 items-center justify-center rounded-xl text-brand-brownDeep transition-transform hover:scale-105 disabled:opacity-30"
               style={{ background: agent.accent }}
               aria-label="Send message"

@@ -1,12 +1,27 @@
 import { useEffect, useState } from 'react'
-import { Routes, Route, useLocation } from 'react-router-dom'
+import { Routes, Route, useLocation, Navigate } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import Home from './pages/Home'
 import AgentPage from './pages/AgentPage'
+import Login from './pages/Login'
 import Navbar from './components/ui/Navbar'
 import Loader from './components/ui/Loader'
 import { TransitionProvider } from './components/ui/TransitionProvider'
 import { useSmoothScroll } from './hooks/useSmoothScroll'
+
+// True when a login session exists in local storage.
+function isAuthenticated() {
+  try {
+    return !!localStorage.getItem('ii_user')
+  } catch {
+    return false
+  }
+}
+
+// Gate protected pages: send unauthenticated visitors to the login screen.
+function RequireAuth({ children }) {
+  return isAuthenticated() ? children : <Navigate to="/login" replace />
+}
 
 // Fade wrapper for route content so navigation never feels abrupt.
 function Page({ children }) {
@@ -28,19 +43,31 @@ function AnimatedRoutes() {
     <AnimatePresence mode="wait">
       <Routes location={location} key={location.pathname}>
         <Route
-          path="/"
+          path="/login"
           element={
             <Page>
-              <Home />
+              <Login />
             </Page>
+          }
+        />
+        <Route
+          path="/"
+          element={
+            <RequireAuth>
+              <Page>
+                <Home />
+              </Page>
+            </RequireAuth>
           }
         />
         <Route
           path="/agent/:slug"
           element={
-            <Page>
-              <AgentPage />
-            </Page>
+            <RequireAuth>
+              <Page>
+                <AgentPage />
+              </Page>
+            </RequireAuth>
           }
         />
       </Routes>
@@ -52,6 +79,7 @@ export default function App() {
   useSmoothScroll()
   const { pathname } = useLocation()
   const isAgentPage = pathname.startsWith('/agent')
+  const isLoginPage = pathname.startsWith('/login')
   const [booting, setBooting] = useState(true)
   const [progress, setProgress] = useState(0)
 
@@ -84,7 +112,7 @@ export default function App() {
     <TransitionProvider>
       <div className="noise-overlay" aria-hidden />
       <AnimatePresence>{booting && <Loader progress={progress} />}</AnimatePresence>
-      {!isAgentPage && <Navbar />}
+      {!isAgentPage && !isLoginPage && <Navbar />}
       <AnimatedRoutes />
     </TransitionProvider>
   )
