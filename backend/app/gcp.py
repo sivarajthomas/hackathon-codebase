@@ -13,8 +13,10 @@ for real BigQuery calls later.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -152,8 +154,493 @@ class GCPClients:
         return None
 
     async def write_audit_log(self, record: dict[str, Any]) -> None:
-        # TODO(placeholder): append to BigQuery audit table / Cloud Logging.
+        """Append a security/compliance event to the BigQuery audit table.
+
+        No-op when BigQuery is not configured (dev/POC). Never raises: audit
+        failures must not break the calling request.
+        """
+        if not self._bq_configured():
+            return None
+        try:
+            from google.cloud import bigquery
+
+            detail = record.get("detail")
+            actor_role = record.get("actor_role")
+            sql = (
+                f"INSERT INTO {self._table_fqn(self.settings.bigquery_audit_logs_table)} "
+                "(audit_id, actor_user_id, actor_role, action, subject_type, "
+                "subject_id, invoice_number, ip_address, detail, event_time) "
+                "VALUES (@aid, @actor, @role, @action, @stype, @sid, @inv, @ip, "
+                "IF(@detail IS NULL, NULL, PARSE_JSON(@detail)), @now)"
+            )
+            params = [
+                bigquery.ScalarQueryParameter("aid", "STRING", f"a-{uuid.uuid4().hex[:12]}"),
+                bigquery.ScalarQueryParameter("actor", "STRING", str(record.get("actor_user_id") or "unknown")),
+                bigquery.ScalarQueryParameter("role", "STRING", str(actor_role) if actor_role else None),
+                bigquery.ScalarQueryParameter("action", "STRING", str(record.get("action") or "UNKNOWN")),
+                bigquery.ScalarQueryParameter("stype", "STRING", record.get("subject_type")),
+                bigquery.ScalarQueryParameter("sid", "STRING", record.get("subject_id")),
+                bigquery.ScalarQueryParameter("inv", "STRING", record.get("invoice_number")),
+                bigquery.ScalarQueryParameter("ip", "STRING", record.get("ip_address")),
+                bigquery.ScalarQueryParameter("detail", "STRING", json.dumps(detail) if detail is not None else None),
+                bigquery.ScalarQueryParameter("now", "TIMESTAMP", datetime.now(timezone.utc)),
+            ]
+            await self._bq_query(sql, params)
+        except Exception as exc:  # pragma: no cover - audit must never break a request
+            logger.warning("Audit log write failed: %s", exc)
         return None
+
+    # ------------------------------------------------------------------ #
+    # App tables — users / invoice_metadata / conversations / messages
+    # (live BigQuery; fall back to the in-memory stores when not configured)
+    # ------------------------------------------------------------------ #
+    def _app_dataset(self) -> str:
+        """Dataset for the non-invoice app plane (auth/chat/audit).
+
+        Separate from ``bigquery_dataset`` (the invoice/MCP data plane) so these
+        tables never surface to the BigQuery MCP catalog/grounding (and secrets
+        like users.password_hash are never browsable by the MCP). Falls back to
+        ``bigquery_dataset`` when unset for single-dataset dev.
+        """
+        return self.settings.bigquery_app_dataset or self.settings.bigquery_dataset
+
+    def _app_tables(self) -> set[str]:
+        """Non-invoice tables that live in the separate app dataset."""
+        return {
+            self.settings.bigquery_users_table,
+            self.settings.bigquery_conversations_table,
+            self.settings.bigquery_messages_table,
+            self.settings.bigquery_audit_logs_table,
+        }
+
+    def _table_fqn(self, table: str) -> str:
+        """Backtick-qualified `project.dataset.table`.
+
+        Non-invoice app tables resolve to the app dataset; invoice_metadata (and
+        any other invoice/MCP-plane table) resolves to ``bigquery_dataset``.
+        """
+        dataset = self._app_dataset() if table in self._app_tables() else self.settings.bigquery_dataset
+        return f"`{self._bq_project()}.{dataset}.{table}`"
+
+    @staticmethod
+    def _parse_evidence(raw: Any) -> list:
+        """Parse a JSON evidence payload into EvidenceItem[] (tolerant)."""
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(data, list):
+            return []
+        from .schemas import EvidenceItem
+
+        items = []
+        for entry in data:
+            try:
+                items.append(EvidenceItem(**entry))
+            except Exception:  # skip malformed rows rather than fail the read
+                continue
+        return items
+
+    async def get_user_by_username(self, username: str) -> Optional[dict[str, Any]]:
+        """Look up a user by login handle. BigQuery when configured, else in-memory."""
+        if not self._bq_configured():
+            from . import auth
+
+            return await auth.get_user_by_username(username)
+
+        from google.cloud import bigquery
+        from .schemas import Role
+
+        sql = (
+            "SELECT user_id, username, display_name, password_hash, primary_role, "
+            "contract_ids, is_active "
+            f"FROM {self._table_fqn(self.settings.bigquery_users_table)} "
+            "WHERE LOWER(username) = @u AND is_active = TRUE LIMIT 1"
+        )
+        try:
+            rows = await self._bq_query(
+                sql,
+                [bigquery.ScalarQueryParameter("u", "STRING", (username or "").strip().lower())],
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("User lookup failed: %s", exc)
+            return None
+        if not rows:
+            return None
+        r = rows[0]
+        return {
+            "user_id": r["user_id"],
+            "username": r["username"],
+            "display_name": r.get("display_name"),
+            "password_hash": r["password_hash"],
+            "primary_role": Role(r["primary_role"]),
+            "contract_ids": list(r.get("contract_ids") or []),
+            "is_active": bool(r.get("is_active")),
+        }
+
+    async def get_invoice_context(
+        self, invoice_number: str, contract_ids: Optional[list[str]] = None
+    ) -> Any:
+        """Return denormalised invoice context, enforcing contract-scope access.
+
+        Raises ``PermissionError`` when the invoice is outside the caller's
+        contract scope; returns ``None`` when not found.
+        """
+        if not self._bq_configured():
+            from . import chat_store
+
+            return chat_store.get_invoice_context(invoice_number, contract_ids)
+
+        from google.cloud import bigquery
+        from .schemas import InvoiceContext
+
+        sql = (
+            "SELECT invoice_number, invoice_date, customer_id, contract_number, "
+            "shipment_ids, status, dispute_reason, currency, total_amount, "
+            "source_system, last_updated "
+            f"FROM {self._table_fqn(self.settings.bigquery_invoice_metadata_table)} "
+            "WHERE UPPER(invoice_number) = @n LIMIT 1"
+        )
+        rows = await self._bq_query(
+            sql,
+            [bigquery.ScalarQueryParameter("n", "STRING", (invoice_number or "").strip().upper())],
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        if contract_ids and row.get("contract_number") not in contract_ids:
+            raise PermissionError(invoice_number)
+        last_updated = row.get("last_updated")
+        total = row.get("total_amount")
+        return InvoiceContext(
+            invoice_number=row["invoice_number"],
+            exists=True,
+            invoice_date=row.get("invoice_date"),
+            customer_id=row.get("customer_id"),
+            contract_number=row.get("contract_number"),
+            shipment_ids=list(row.get("shipment_ids") or []),
+            status=row.get("status"),
+            dispute_reason=row.get("dispute_reason"),
+            currency=row.get("currency"),
+            total_amount=self._to_float(total) if total is not None else None,
+            source_system=row.get("source_system") or "BigQuery",
+            last_updated=str(last_updated) if last_updated else None,
+        )
+
+    async def create_conversation(
+        self, user_id: str, agent: str, invoice_number: Optional[str], title: Optional[str] = None
+    ) -> Any:
+        if not self._bq_configured():
+            from . import chat_store
+
+            return chat_store.create_conversation(user_id, agent, invoice_number, title)
+
+        from google.cloud import bigquery
+        from .schemas import ConversationSummary
+
+        conv_id = f"cv-{uuid.uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc)
+        display_title = title or "New conversation"
+        sql = (
+            f"INSERT INTO {self._table_fqn(self.settings.bigquery_conversations_table)} "
+            "(conversation_id, user_id, agent, invoice_number, as_of_date, title, "
+            "message_count, is_deleted, created_at, updated_at) "
+            "VALUES (@cid, @uid, @agent, @inv, NULL, @title, 0, FALSE, @now, @now)"
+        )
+        await self._bq_query(
+            sql,
+            [
+                bigquery.ScalarQueryParameter("cid", "STRING", conv_id),
+                bigquery.ScalarQueryParameter("uid", "STRING", user_id),
+                bigquery.ScalarQueryParameter("agent", "STRING", agent),
+                bigquery.ScalarQueryParameter("inv", "STRING", invoice_number or ""),
+                bigquery.ScalarQueryParameter("title", "STRING", display_title),
+                bigquery.ScalarQueryParameter("now", "TIMESTAMP", now),
+            ],
+        )
+        return ConversationSummary(
+            conversation_id=conv_id,
+            user_id=user_id,
+            agent=agent,
+            invoice_number=invoice_number,
+            title=display_title,
+            message_count=0,
+            created_at=now,
+            updated_at=now,
+        )
+
+    async def get_conversation(self, conv_id: str, user_id: str) -> Any:
+        if not self._bq_configured():
+            from . import chat_store
+
+            return chat_store.get_conversation(conv_id, user_id)
+
+        from google.cloud import bigquery
+        from .schemas import ConversationDetail, MessageRecord
+
+        conv_sql = (
+            "SELECT conversation_id, user_id, agent, invoice_number, title, "
+            "message_count, created_at, updated_at "
+            f"FROM {self._table_fqn(self.settings.bigquery_conversations_table)} "
+            "WHERE conversation_id = @cid AND user_id = @uid AND is_deleted = FALSE LIMIT 1"
+        )
+        convs = await self._bq_query(
+            conv_sql,
+            [
+                bigquery.ScalarQueryParameter("cid", "STRING", conv_id),
+                bigquery.ScalarQueryParameter("uid", "STRING", user_id),
+            ],
+        )
+        if not convs:
+            return None
+        c = convs[0]
+        msg_sql = (
+            "SELECT message_id, conversation_id, role, question, response, "
+            "TO_JSON_STRING(evidence) AS evidence, trace_id, status, created_at "
+            f"FROM {self._table_fqn(self.settings.bigquery_messages_table)} "
+            "WHERE conversation_id = @cid ORDER BY created_at ASC"
+        )
+        msgs = await self._bq_query(
+            msg_sql, [bigquery.ScalarQueryParameter("cid", "STRING", conv_id)]
+        )
+        records = [
+            MessageRecord(
+                message_id=m["message_id"],
+                conversation_id=m["conversation_id"],
+                role=m["role"],
+                question=m.get("question"),
+                response=m.get("response"),
+                evidence=self._parse_evidence(m.get("evidence")),
+                trace_id=m.get("trace_id"),
+                status=m.get("status"),
+                created_at=m["created_at"],
+            )
+            for m in msgs
+        ]
+        return ConversationDetail(
+            conversation_id=c["conversation_id"],
+            user_id=c["user_id"],
+            agent=c["agent"],
+            invoice_number=c.get("invoice_number"),
+            title=c.get("title") or "New conversation",
+            message_count=c.get("message_count") or 0,
+            created_at=c["created_at"],
+            updated_at=c["updated_at"],
+            messages=records,
+        )
+
+    async def list_conversations(
+        self,
+        user_id: str,
+        q: Optional[str] = None,
+        agent: Optional[str] = None,
+        invoice_number: Optional[str] = None,
+        limit: int = 50,
+    ) -> list:
+        if not self._bq_configured():
+            from . import chat_store
+
+            return chat_store.list_conversations(user_id, q, agent, invoice_number, limit)
+
+        from google.cloud import bigquery
+        from .schemas import ConversationSummary
+
+        clauses = ["user_id = @uid", "is_deleted = FALSE"]
+        params = [bigquery.ScalarQueryParameter("uid", "STRING", user_id)]
+        if agent:
+            clauses.append("agent = @agent")
+            params.append(bigquery.ScalarQueryParameter("agent", "STRING", agent))
+        if invoice_number:
+            clauses.append("invoice_number = @inv")
+            params.append(bigquery.ScalarQueryParameter("inv", "STRING", invoice_number))
+        if q:
+            clauses.append("LOWER(title) LIKE @q")
+            params.append(bigquery.ScalarQueryParameter("q", "STRING", f"%{q.strip().lower()}%"))
+        sql = (
+            "SELECT conversation_id, user_id, agent, invoice_number, title, "
+            "message_count, created_at, updated_at "
+            f"FROM {self._table_fqn(self.settings.bigquery_conversations_table)} "
+            f"WHERE {' AND '.join(clauses)} ORDER BY updated_at DESC LIMIT {int(limit)}"
+        )
+        rows = await self._bq_query(sql, params)
+        return [
+            ConversationSummary(
+                conversation_id=r["conversation_id"],
+                user_id=r["user_id"],
+                agent=r["agent"],
+                invoice_number=r.get("invoice_number"),
+                title=r.get("title") or "New conversation",
+                message_count=r.get("message_count") or 0,
+                created_at=r["created_at"],
+                updated_at=r["updated_at"],
+            )
+            for r in rows
+        ]
+
+    async def append_message(
+        self,
+        conv_id: str,
+        user_id: str,
+        role: str,
+        *,
+        question: Optional[str] = None,
+        response: Optional[str] = None,
+        evidence: Optional[list] = None,
+        trace_id: Optional[str] = None,
+        status: Optional[str] = None,
+        set_title_from: Optional[str] = None,
+    ) -> Any:
+        if not self._bq_configured():
+            from . import chat_store
+
+            return chat_store.append_message(
+                conv_id,
+                user_id,
+                role,
+                question=question,
+                response=response,
+                evidence=evidence,
+                trace_id=trace_id,
+                status=status,
+                set_title_from=set_title_from,
+            )
+
+        from google.cloud import bigquery
+        from .schemas import EvidenceItem, MessageRecord
+
+        # Confirm ownership (and that the conversation is live) before writing.
+        own = await self._bq_query(
+            "SELECT title FROM "
+            f"{self._table_fqn(self.settings.bigquery_conversations_table)} "
+            "WHERE conversation_id = @cid AND user_id = @uid AND is_deleted = FALSE LIMIT 1",
+            [
+                bigquery.ScalarQueryParameter("cid", "STRING", conv_id),
+                bigquery.ScalarQueryParameter("uid", "STRING", user_id),
+            ],
+        )
+        if not own:
+            return None
+
+        msg_id = f"m-{uuid.uuid4().hex[:12]}"
+        now = datetime.now(timezone.utc)
+        ev_list = [e.model_dump() if isinstance(e, EvidenceItem) else e for e in (evidence or [])]
+
+        # INSERT ... SELECT pulls invoice_number + agent from the conversation row
+        # (both NOT NULL in the messages table) in a single statement.
+        insert_sql = (
+            f"INSERT INTO {self._table_fqn(self.settings.bigquery_messages_table)} "
+            "(message_id, conversation_id, user_id, invoice_number, agent, role, "
+            "question, response, evidence, trace_id, status, created_at) "
+            "SELECT @mid, @cid, @uid, invoice_number, agent, @role, @q, @resp, "
+            "PARSE_JSON(@ev), @trace, @status, @now "
+            f"FROM {self._table_fqn(self.settings.bigquery_conversations_table)} "
+            "WHERE conversation_id = @cid LIMIT 1"
+        )
+        await self._bq_query(
+            insert_sql,
+            [
+                bigquery.ScalarQueryParameter("mid", "STRING", msg_id),
+                bigquery.ScalarQueryParameter("cid", "STRING", conv_id),
+                bigquery.ScalarQueryParameter("uid", "STRING", user_id),
+                bigquery.ScalarQueryParameter("role", "STRING", role),
+                bigquery.ScalarQueryParameter("q", "STRING", question),
+                bigquery.ScalarQueryParameter("resp", "STRING", response),
+                bigquery.ScalarQueryParameter("ev", "STRING", json.dumps(ev_list)),
+                bigquery.ScalarQueryParameter("trace", "STRING", trace_id),
+                bigquery.ScalarQueryParameter("status", "STRING", status),
+                bigquery.ScalarQueryParameter("now", "TIMESTAMP", now),
+            ],
+        )
+
+        # Bump counter / timestamp, and set the title from the first user message.
+        upd_params = [
+            bigquery.ScalarQueryParameter("cid", "STRING", conv_id),
+            bigquery.ScalarQueryParameter("now", "TIMESTAMP", now),
+        ]
+        if set_title_from:
+            title = set_title_from.strip()
+            title = (title[:38] + "\u2026") if len(title) > 38 else title
+            upd_sql = (
+                f"UPDATE {self._table_fqn(self.settings.bigquery_conversations_table)} "
+                "SET message_count = message_count + 1, updated_at = @now, "
+                "title = IF(title = 'New conversation', @title, title) "
+                "WHERE conversation_id = @cid"
+            )
+            upd_params.append(bigquery.ScalarQueryParameter("title", "STRING", title))
+        else:
+            upd_sql = (
+                f"UPDATE {self._table_fqn(self.settings.bigquery_conversations_table)} "
+                "SET message_count = message_count + 1, updated_at = @now "
+                "WHERE conversation_id = @cid"
+            )
+        await self._bq_query(upd_sql, upd_params)
+
+        return MessageRecord(
+            message_id=msg_id,
+            conversation_id=conv_id,
+            role=role,  # type: ignore[arg-type]
+            question=question,
+            response=response,
+            evidence=[EvidenceItem(**e) if isinstance(e, dict) else e for e in ev_list],
+            trace_id=trace_id,
+            status=status,
+            created_at=now,
+        )
+
+    async def soft_delete_conversation(self, conv_id: str, user_id: str) -> bool:
+        if not self._bq_configured():
+            from . import chat_store
+
+            return chat_store.soft_delete_conversation(conv_id, user_id)
+
+        from google.cloud import bigquery
+
+        params = [
+            bigquery.ScalarQueryParameter("cid", "STRING", conv_id),
+            bigquery.ScalarQueryParameter("uid", "STRING", user_id),
+        ]
+        exists = await self._bq_query(
+            "SELECT conversation_id FROM "
+            f"{self._table_fqn(self.settings.bigquery_conversations_table)} "
+            "WHERE conversation_id = @cid AND user_id = @uid LIMIT 1",
+            params,
+        )
+        if not exists:
+            return False
+        await self._bq_query(
+            f"UPDATE {self._table_fqn(self.settings.bigquery_conversations_table)} "
+            "SET is_deleted = TRUE, updated_at = @now "
+            "WHERE conversation_id = @cid AND user_id = @uid",
+            params + [bigquery.ScalarQueryParameter("now", "TIMESTAMP", datetime.now(timezone.utc))],
+        )
+        return True
+
+    async def delete_all_conversations(self, user_id: str) -> int:
+        if not self._bq_configured():
+            from . import chat_store
+
+            return chat_store.delete_all_conversations(user_id)
+
+        from google.cloud import bigquery
+
+        uid = bigquery.ScalarQueryParameter("uid", "STRING", user_id)
+        counted = await self._bq_query(
+            "SELECT COUNT(*) AS c FROM "
+            f"{self._table_fqn(self.settings.bigquery_conversations_table)} "
+            "WHERE user_id = @uid AND is_deleted = FALSE",
+            [uid],
+        )
+        count = int(counted[0]["c"]) if counted else 0
+        if count:
+            await self._bq_query(
+                f"UPDATE {self._table_fqn(self.settings.bigquery_conversations_table)} "
+                "SET is_deleted = TRUE, updated_at = @now "
+                "WHERE user_id = @uid AND is_deleted = FALSE",
+                [uid, bigquery.ScalarQueryParameter("now", "TIMESTAMP", datetime.now(timezone.utc))],
+            )
+        return count
 
     # ------------------------------------------------------------------ #
     # BigQuery findings store — Prevent "invoices with issues" (live)

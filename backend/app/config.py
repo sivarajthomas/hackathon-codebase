@@ -35,6 +35,20 @@ class Settings(BaseSettings):
     bigquery_dataset: str = "REPLACE_ME"
     bigquery_analyzed_table: str = "analyzed_data"   # POC: pre-analyzed data (Prevent input)
     bigquery_findings_table: str = "findings_store"  # findings store (Prevent writes here)
+    # App tables (auth + chat history + invoice context + audit). Live BigQuery
+    # persistence activates only when bigquery_project/dataset are configured;
+    # otherwise the in-memory stores in auth.py / chat_store.py are used.
+    #
+    # These live in a SEPARATE dataset from bigquery_dataset (the invoice/MCP
+    # data plane) so they never appear to the BigQuery MCP catalog/grounding
+    # (and secrets like users.password_hash are never browsable by the MCP).
+    # Defaults to bigquery_dataset when unset (single-dataset dev convenience).
+    bigquery_app_dataset: str = "users_raw"
+    bigquery_users_table: str = "users"
+    bigquery_conversations_table: str = "conversations"
+    bigquery_messages_table: str = "messages"
+    bigquery_invoice_metadata_table: str = "invoice_metadata"
+    bigquery_audit_logs_table: str = "audit_logs"
     gcs_bucket: str = "REPLACE_ME"
     invoice_resource_uri: str = "REPLACE_ME"  # invoice-resource Finding/invoice store
     cs_queue_backend: str = "REPLACE_ME"  # Pub/Sub topic / Firestore collection for CS queue
@@ -72,6 +86,12 @@ class Settings(BaseSettings):
     # --- Guardrails ---
     ragas_groundedness_threshold: float = 0.7
     dlp_template_name: str = "REPLACE_ME"
+
+    # --- Auth (JWT) ---
+    # HS256 signing secret for issued access tokens. This default is for local
+    # dev only; provide a strong secret via JWT_SECRET (env / Secret Manager).
+    jwt_secret: str = "dev-insecure-change-me-please-set-a-real-32B+-secret"
+    jwt_ttl_seconds: int = 3600  # access-token lifetime
 
     # --- SLO ---
     explain_slo_seconds: float = 5.0

@@ -8,19 +8,12 @@ import Navbar from './components/ui/Navbar'
 import Loader from './components/ui/Loader'
 import { TransitionProvider } from './components/ui/TransitionProvider'
 import { useSmoothScroll } from './hooks/useSmoothScroll'
-
-// True when a login session exists in local storage.
-function isAuthenticated() {
-  try {
-    return !!localStorage.getItem('ii_user')
-  } catch {
-    return false
-  }
-}
+import { useAuth } from './hooks/useAuth'
 
 // Gate protected pages: send unauthenticated visitors to the login screen.
 function RequireAuth({ children }) {
-  return isAuthenticated() ? children : <Navigate to="/login" replace />
+  const { isAuthenticated } = useAuth()
+  return isAuthenticated ? children : <Navigate to="/login" replace />
 }
 
 // Fade wrapper for route content so navigation never feels abrupt.

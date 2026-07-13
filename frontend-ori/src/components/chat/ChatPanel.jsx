@@ -9,6 +9,7 @@ import UpsLogo from '../ui/UpsLogo'
 import { useTransition } from '../ui/TransitionProvider'
 import { agents } from '../../data/agents'
 import { sendChatMessage, getFlaggedInvoices, reviewFlaggedInvoice } from '../../lib/api'
+import { useAuth } from '../../hooks/useAuth'
 
 // Fallback, agent-flavored responses used only when the backend is unreachable
 // so the demo stays usable offline. Live replies come from the backend API.
@@ -46,6 +47,7 @@ const makeSession = (agent) => ({
   id: uid(),
   title: 'New conversation',
   time: 'Just now',
+  conversationId: null,
   messages: [{ id: uid(), role: 'ai', text: agent.greeting }],
   showPrompts: true,
 })
@@ -83,6 +85,10 @@ export default function ChatPanel({ agent }) {
   // Quick-reference fields shown above the prompt box for every agent.
   const [invoiceNumber, setInvoiceNumber] = useState('')
   const [invoiceDate, setInvoiceDate] = useState('')
+
+  const { allowedAgents } = useAuth()
+  const visibleAgents =
+    allowedAgents && allowedAgents.length ? agents.filter((a) => allowedAgents.includes(a.slug)) : agents
 
   const active = sessions.find((s) => s.id === activeId) || sessions[0]
 
@@ -164,9 +170,13 @@ export default function ChatPanel({ agent }) {
   const respondTo = async (id, text, history = []) => {
     setTyping(true)
     try {
+      const priorSession = sessions.find((s) => s.id === id) || active
       const res = await sendChatMessage({
         agent: agent.slug,
         message: text,
+        invoiceNumber: invoiceNumber.trim() || undefined,
+        invoiceDate: invoiceDate.trim() || undefined,
+        conversationId: priorSession?.conversationId || undefined,
         traceId: pendingTrace.current[id],
         history,
       })
@@ -179,7 +189,8 @@ export default function ChatPanel({ agent }) {
       }
       updateSession(id, (s) => ({
         ...s,
-        messages: [...s.messages, { id: uid(), role: 'ai', text: res.reply }],
+        conversationId: res.conversationId || s.conversationId,
+        messages: [...s.messages, { id: uid(), role: 'ai', text: res.reply, evidence: res.evidence }],
       }))
     } catch {
       // Backend unreachable — fall back to a canned reply so the demo continues.
@@ -481,7 +492,7 @@ export default function ChatPanel({ agent }) {
       <div className="border-t border-brand-brown/10 px-3 py-4">
         <div className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-brand-brown/40">Agents</div>
         <div className="space-y-1">
-          {agents.map((a) => (
+          {visibleAgents.map((a) => (
             <Link
               key={a.slug}
               to={`/agent/${a.slug}`}
@@ -593,7 +604,7 @@ export default function ChatPanel({ agent }) {
         <div ref={scrollRef} data-lenis-prevent className="flex-1 overflow-y-auto px-4 py-6 md:px-8">
           <div className="mx-auto flex max-w-3xl flex-col gap-5">
             {active?.messages.map((m) => (
-              <Message key={m.id} role={m.role} text={m.text} accent={agent.accent} />
+              <Message key={m.id} role={m.role} text={m.text} accent={agent.accent} evidence={m.evidence} />
             ))}
             <AnimatePresence>{typing && <TypingIndicator accent={agent.accent} label={THINKING[agent.slug] || 'Thinking…'} />}</AnimatePresence>
           </div>

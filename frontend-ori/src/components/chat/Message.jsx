@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion'
+import EvidencePanel from './EvidencePanel'
 
 // Render inline emphasis: **bold**, `code`. Returns an array of React nodes.
 function renderInline(text) {
@@ -88,7 +89,7 @@ function renderMarkdown(text) {
 }
 
 // A single chat bubble with a smooth spring entrance. `role` is 'user' | 'ai'.
-export default function Message({ role, text, accent }) {
+export default function Message({ role, text, accent, evidence }) {
   const isUser = role === 'user'
 
   return (
@@ -111,6 +112,7 @@ export default function Message({ role, text, accent }) {
         }
       >
         {isUser ? text : renderMarkdown(text)}
+        {!isUser && evidence?.length > 0 && <EvidencePanel evidence={evidence} accent={accent} />}
       </div>
     </motion.div>
   )

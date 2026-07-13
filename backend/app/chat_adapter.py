@@ -18,6 +18,7 @@ from .schemas import (
     ChatRequest,
     ChatResponse,
     ClarifyRequest,
+    EvidenceItem,
     INTERACTIVE_VERBS,
     PipelineStatus,
     ProcessRequest,
@@ -272,7 +273,59 @@ def _to_chat_response(resp: ProcessResponse) -> ChatResponse:
         status=resp.status,
         verb=resp.verb,
         reply=_format_reply(resp),
+        evidence=_extract_evidence(resp.verb, resp.output or {}),
         requires_human_review=resp.requires_human_review,
         queue_task_id=resp.queue_task_id,
         output=resp.output,
     )
+
+
+def _extract_evidence(verb: Optional[Verb], output: dict) -> list[EvidenceItem]:
+    """Map the per-verb structured output's citations/evidence into a uniform,
+    UI-friendly attribution list (traceability).
+
+    Reuses the existing ``citations`` (Explain/Simulate) and ``evidence``
+    (Resolve/Prevent) fields already produced by the pipeline — nothing new is
+    computed, the proof is simply surfaced instead of being discarded.
+    """
+    output = output or {}
+    items: list[EvidenceItem] = []
+
+    for citation in output.get("citations", []) or []:
+        if not isinstance(citation, dict):
+            continue
+        score = citation.get("score", 0.0) or 0.0
+        confidence = round(score * 100, 1) if 0 < score <= 1 else (score or 100.0)
+        items.append(
+            EvidenceItem(
+                source_object=citation.get("source_type") or "source",
+                record_id=citation.get("source_id"),
+                retrieved_fields=[],
+                confidence=confidence,
+                snippet=citation.get("snippet"),
+                locator=citation.get("locator"),
+                source_system=(citation.get("source_type") or "BigQuery").upper()
+                if citation.get("source_type") in {"bigquery", "gcs"}
+                else "BigQuery",
+            )
+        )
+
+    for ev in output.get("evidence", []) or []:
+        if not isinstance(ev, dict):
+            continue
+        citation = ev.get("citation") or {}
+        items.append(
+            EvidenceItem(
+                source_object=(citation.get("source_type") if isinstance(citation, dict) else None)
+                or ev.get("label")
+                or "evidence",
+                record_id=citation.get("source_id") if isinstance(citation, dict) else None,
+                retrieved_fields=[ev["label"]] if ev.get("label") else [],
+                confidence=100.0,
+                snippet=str(ev.get("value")) if ev.get("value") is not None else None,
+                locator=citation.get("locator") if isinstance(citation, dict) else None,
+            )
+        )
+
+    return items
+

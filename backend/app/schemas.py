@@ -57,6 +57,13 @@ class Channel(str, Enum):
     CUSTOMER_PORTAL = "customer"  # self-service portal: NO CS human present
 
 
+class Role(str, Enum):
+    """Application user roles (drives agent visibility + authorization)."""
+
+    CUSTOMER = "CUSTOMER"
+    CUSTOMER_SUPPORT = "CUSTOMER_SUPPORT"
+
+
 class PipelineStatus(str, Enum):
     COMPLETED = "completed"
     CLARIFICATION_NEEDED = "clarification_needed"
@@ -217,6 +224,7 @@ class ChatRequest(BaseModel):
     scenario_params: dict[str, Any] = Field(default_factory=dict)
     history: list["ChatTurn"] = Field(default_factory=list)  # prior turns (oldest first)
     trace_id: Optional[str] = None  # set to resume a pending clarification
+    conversation_id: Optional[str] = None  # multi-session thread this turn belongs to
     channel: "Channel" = Channel.CS
     user: Optional[UserContext] = None
 
@@ -228,10 +236,108 @@ class ChatResponse(BaseModel):
     status: "PipelineStatus"
     verb: Optional["Verb"] = None
     reply: str
+    evidence: list["EvidenceItem"] = Field(default_factory=list)  # source attribution
     requires_human_review: bool = False
     queue_task_id: Optional[str] = None
     output: Optional[dict[str, Any]] = None
+    conversation_id: Optional[str] = None
+    message_id: Optional[str] = None
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+# --------------------------------------------------------------------------- #
+# Auth (role-based login + JWT)
+# --------------------------------------------------------------------------- #
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class PublicUser(BaseModel):
+    """User identity safe to return to the client (no secrets)."""
+
+    user_id: str
+    username: str
+    display_name: Optional[str] = None
+    role: Role
+    contract_ids: list[str] = Field(default_factory=list)
+    allowed_agents: list[str] = Field(default_factory=list)
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: Literal["bearer"] = "bearer"
+    expires_in: int
+    user: PublicUser
+
+
+# --------------------------------------------------------------------------- #
+# Response attribution / evidence (traceability)
+# --------------------------------------------------------------------------- #
+class EvidenceItem(BaseModel):
+    """Enterprise-grade source attribution surfaced with every agent answer."""
+
+    source_object: str                       # e.g. "invoice_records", "Invoice_Status"
+    record_id: Optional[str] = None          # e.g. "IS-100921"
+    retrieved_fields: list[str] = Field(default_factory=list)
+    confidence: float = 100.0                # 0..100
+    last_updated: Optional[str] = None
+    source_system: str = "BigQuery"          # BigQuery | GCS | SAP | contract
+    snippet: Optional[str] = None
+    locator: Optional[str] = None            # uri / row key / page#section
+
+
+# --------------------------------------------------------------------------- #
+# Chat history / multi-session (conversations + messages)
+# --------------------------------------------------------------------------- #
+class MessageRecord(BaseModel):
+    message_id: str
+    conversation_id: str
+    role: Literal["user", "assistant"]
+    question: Optional[str] = None
+    response: Optional[str] = None
+    evidence: list[EvidenceItem] = Field(default_factory=list)
+    trace_id: Optional[str] = None
+    status: Optional[str] = None
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class ConversationSummary(BaseModel):
+    conversation_id: str
+    user_id: str
+    agent: str
+    invoice_number: Optional[str] = None
+    title: str = "New conversation"
+    message_count: int = 0
+    created_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class ConversationDetail(ConversationSummary):
+    messages: list[MessageRecord] = Field(default_factory=list)
+
+
+class CreateConversationRequest(BaseModel):
+    agent: str
+    invoice_number: Optional[str] = None
+    title: Optional[str] = None
+
+
+class InvoiceContext(BaseModel):
+    """Denormalised invoice context that replaces LLM-based invoice discovery."""
+
+    invoice_number: str
+    exists: bool = True
+    invoice_date: Optional[date] = None
+    customer_id: Optional[str] = None
+    contract_number: Optional[str] = None
+    shipment_ids: list[str] = Field(default_factory=list)
+    status: Optional[str] = None
+    dispute_reason: Optional[str] = None
+    currency: Optional[str] = None
+    total_amount: Optional[float] = None
+    source_system: str = "BigQuery"
+    last_updated: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #

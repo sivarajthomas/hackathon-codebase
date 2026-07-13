@@ -1,10 +1,16 @@
 import { motion } from 'framer-motion'
 import { agents } from '../../data/agents'
 import AgentCard from './AgentCard'
+import { useAuth } from '../../hooks/useAuth'
 
-// The interactive selection stage: four floating agent cards in a responsive
-// grid, introduced by a scroll-revealed heading.
+// The interactive selection stage: agent cards in a responsive grid, filtered
+// by the signed-in user's role (customers never see the Prevent agent).
 export default function AgentsSection() {
+  const { allowedAgents } = useAuth()
+  const visibleAgents =
+    allowedAgents && allowedAgents.length
+      ? agents.filter((a) => allowedAgents.includes(a.slug))
+      : agents
   return (
     <section id="agents" className="relative mx-auto max-w-6xl px-6 py-32 md:py-40">
       <div className="mb-16 text-center">
@@ -39,7 +45,7 @@ export default function AgentsSection() {
       </div>
 
       <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-4">
-        {agents.map((agent, i) => (
+        {visibleAgents.map((agent, i) => (
           <AgentCard key={agent.id} agent={agent} index={i} />
         ))}
       </div>

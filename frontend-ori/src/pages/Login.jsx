@@ -2,19 +2,21 @@ import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import UpsLogo from '../components/ui/UpsLogo'
+import { useAuth } from '../hooks/useAuth'
 
-// A branded login screen: users sign in with a user ID and password. On a valid
-// submit we persist a lightweight session flag and route into the app. This is
-// a front-end demo login (no real backend auth wired up yet).
+// A branded login screen: users sign in with a username and password. On a
+// valid submit we exchange credentials for a JWT (role-based), persist the
+// session, and route into the app.
 export default function Login() {
   const navigate = useNavigate()
+  const { login } = useAuth()
   const [userId, setUserId] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
 
-  const onSubmit = (e) => {
+  const onSubmit = async (e) => {
     e.preventDefault()
     if (!userId.trim() || !password.trim()) {
       setError('Please enter both your user ID and password.')
@@ -22,13 +24,13 @@ export default function Login() {
     }
     setError('')
     setSubmitting(true)
-    // Persist a minimal session marker for the demo, then enter the app.
     try {
-      localStorage.setItem('ii_user', JSON.stringify({ userId: userId.trim(), at: Date.now() }))
-    } catch {
-      // Ignore storage failures (private mode, etc.) — still let the user in.
+      await login(userId.trim(), password)
+      navigate('/')
+    } catch (err) {
+      setError(err?.message || 'Sign in failed. Please check your credentials.')
+      setSubmitting(false)
     }
-    window.setTimeout(() => navigate('/'), 500)
   }
 
   return (

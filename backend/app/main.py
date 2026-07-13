@@ -25,6 +25,15 @@ import json
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from .auth import (
+    allowed_agents_for,
+    channel_for,
+    issue_token,
+    optional_user,
+    public_user,
+    require_user,
+    verify_password,
+)
 from .chat_adapter import run_chat
 from .config import Settings, get_settings
 from .orchestrator import Orchestrator
@@ -34,11 +43,17 @@ from .schemas import (
     ChatRequest,
     ChatResponse,
     ClarifyRequest,
+    ConversationDetail,
+    ConversationSummary,
+    CreateConversationRequest,
     CSQueueTask,
     FeedbackPayload,
     FindingStatus,
     FlaggedInvoice,
     HumanReviewPayload,
+    InvoiceContext,
+    LoginRequest,
+    LoginResponse,
     PreventFinding,
     PreventPayload,
     ProcessFindingRequest,
@@ -91,13 +106,219 @@ async def process(
 async def chat(
     body: ChatRequest,
     orch: Orchestrator = Depends(get_orchestrator),
+    user: UserContext | None = Depends(optional_user),
 ) -> ChatResponse:
     """Free-text chat turn from the frontend agent workspace.
 
     Adapts a chat message + chosen agent to the pipeline and returns a
     flattened, chat-friendly text reply plus the underlying structured output.
+
+    When a bearer token is present the caller's role drives agent visibility and
+    the pipeline channel, and the turn is persisted to the conversation history.
+    Anonymous/legacy callers behave exactly as before.
     """
-    return await run_chat(orch, body)
+    agent_slug = (body.agent or "").lower()
+
+    if user is not None:
+        # Role-based agent visibility: customers must not use the Prevent agent.
+        if agent_slug and agent_slug not in allowed_agents_for(user):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Agent '{agent_slug}' is not available for your role.",
+            )
+        # Bind the authenticated identity + channel (never trust client-sent role).
+        body.user = user
+        body.channel = channel_for(user)
+
+    resp = await run_chat(orch, body)
+
+    # Persist the turn to the conversation history (authenticated callers only).
+    if user is not None:
+        try:
+            conv_id = body.conversation_id
+            if not conv_id or (await orch.gcp.get_conversation(conv_id, user.user_id)) is None:
+                summary = await orch.gcp.create_conversation(
+                    user.user_id, agent_slug or "explain", body.invoice_number
+                )
+                conv_id = summary.conversation_id
+            await orch.gcp.append_message(
+                conv_id,
+                user.user_id,
+                role="user",
+                question=body.message,
+                trace_id=resp.trace_id,
+                set_title_from=body.message,
+            )
+            assistant = await orch.gcp.append_message(
+                conv_id,
+                user.user_id,
+                role="assistant",
+                response=resp.reply,
+                evidence=resp.evidence,
+                trace_id=resp.trace_id,
+                status=resp.status.value,
+            )
+            resp.conversation_id = conv_id
+            resp.message_id = assistant.message_id if assistant else None
+            await orch.gcp.write_audit_log(
+                {
+                    "actor_user_id": user.user_id,
+                    "actor_role": user.roles[0] if user.roles else None,
+                    "action": "CHAT",
+                    "subject_type": "message",
+                    "subject_id": resp.message_id,
+                    "invoice_number": body.invoice_number,
+                }
+            )
+        except Exception:  # persistence must never break a chat reply
+            pass
+
+    return resp
+
+
+# --------------------------------------------------------------------------- #
+# Auth (role-based login + JWT)
+# --------------------------------------------------------------------------- #
+@app.post("/v1/auth/login", response_model=LoginResponse)
+async def login(
+    body: LoginRequest,
+    orch: Orchestrator = Depends(get_orchestrator),
+    settings: Settings = Depends(get_settings),
+) -> LoginResponse:
+    record = await orch.gcp.get_user_by_username(body.username)
+    if record is None or not verify_password(body.password, record["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+    token = issue_token(record, settings)
+    await orch.gcp.write_audit_log(
+        {
+            "actor_user_id": record["user_id"],
+            "actor_role": record["primary_role"].value,
+            "action": "LOGIN",
+        }
+    )
+    return LoginResponse(
+        access_token=token,
+        expires_in=settings.jwt_ttl_seconds,
+        user=public_user(record),
+    )
+
+
+@app.get("/v1/auth/me")
+async def auth_me(user: UserContext = Depends(require_user)) -> dict:
+    role = user.roles[0] if user.roles else "CUSTOMER"
+    return {
+        "user_id": user.user_id,
+        "role": role,
+        "contract_ids": user.contract_ids,
+        "allowed_agents": sorted(allowed_agents_for(user)),
+    }
+
+
+@app.post("/v1/auth/logout", status_code=204)
+async def logout(_: UserContext = Depends(require_user)) -> None:
+    # Stateless JWT: the client drops the token. A jti denylist can be added here.
+    return None
+
+
+@app.get("/v1/roles/agents")
+async def roles_agents(user: UserContext = Depends(require_user)) -> dict:
+    return {
+        "role": user.roles[0] if user.roles else "CUSTOMER",
+        "allowed_agents": sorted(allowed_agents_for(user)),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Invoice context (replaces LLM-based invoice discovery)
+# --------------------------------------------------------------------------- #
+@app.get("/v1/invoices/{invoice_number}/context", response_model=InvoiceContext)
+async def invoice_context(
+    invoice_number: str,
+    orch: Orchestrator = Depends(get_orchestrator),
+    user: UserContext = Depends(require_user),
+) -> InvoiceContext:
+    try:
+        ctx = await orch.gcp.get_invoice_context(invoice_number, user.contract_ids)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403, detail="Invoice is not in your contract scope."
+        ) from exc
+    if ctx is None:
+        raise HTTPException(status_code=404, detail=f"Invoice {invoice_number} not found.")
+    return ctx
+
+
+# --------------------------------------------------------------------------- #
+# Conversations / chat history / multi-session
+# --------------------------------------------------------------------------- #
+@app.get("/v1/conversations", response_model=list[ConversationSummary])
+async def list_conversations(
+    q: str | None = None,
+    agent: str | None = None,
+    invoice_number: str | None = None,
+    limit: int = 50,
+    orch: Orchestrator = Depends(get_orchestrator),
+    user: UserContext = Depends(require_user),
+) -> list[ConversationSummary]:
+    return await orch.gcp.list_conversations(user.user_id, q, agent, invoice_number, limit)
+
+
+@app.post("/v1/conversations", response_model=ConversationSummary, status_code=201)
+async def create_conversation(
+    body: CreateConversationRequest,
+    orch: Orchestrator = Depends(get_orchestrator),
+    user: UserContext = Depends(require_user),
+) -> ConversationSummary:
+    return await orch.gcp.create_conversation(
+        user.user_id, body.agent, body.invoice_number, body.title
+    )
+
+
+@app.get("/v1/conversations/{conversation_id}", response_model=ConversationDetail)
+async def get_conversation(
+    conversation_id: str,
+    orch: Orchestrator = Depends(get_orchestrator),
+    user: UserContext = Depends(require_user),
+) -> ConversationDetail:
+    detail = await orch.gcp.get_conversation(conversation_id, user.user_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    return detail
+
+
+@app.delete("/v1/conversations/{conversation_id}", status_code=204)
+async def delete_conversation(
+    conversation_id: str,
+    orch: Orchestrator = Depends(get_orchestrator),
+    user: UserContext = Depends(require_user),
+) -> None:
+    if not await orch.gcp.soft_delete_conversation(conversation_id, user.user_id):
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    await orch.gcp.write_audit_log(
+        {
+            "actor_user_id": user.user_id,
+            "action": "DELETE_CONVERSATION",
+            "subject_type": "conversation",
+            "subject_id": conversation_id,
+        }
+    )
+    return None
+
+
+@app.delete("/v1/conversations")
+async def delete_all_conversations(
+    orch: Orchestrator = Depends(get_orchestrator),
+    user: UserContext = Depends(require_user),
+) -> dict:
+    deleted = await orch.gcp.delete_all_conversations(user.user_id)
+    await orch.gcp.write_audit_log(
+        {
+            "actor_user_id": user.user_id,
+            "action": "DELETE_ALL_CONVERSATIONS",
+            "detail": {"deleted": deleted},
+        }
+    )
+    return {"deleted": deleted}
 
 
 @app.post("/v1/agents/run", response_model=ProcessResponse)
