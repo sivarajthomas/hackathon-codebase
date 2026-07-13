@@ -8,7 +8,15 @@ import AgentIcon from '../ui/AgentIcon'
 import UpsLogo from '../ui/UpsLogo'
 import { useTransition } from '../ui/TransitionProvider'
 import { agents } from '../../data/agents'
-import { sendChatMessage, getFlaggedInvoices, reviewFlaggedInvoice } from '../../lib/api'
+import {
+  sendChatMessage,
+  getFlaggedInvoices,
+  reviewFlaggedInvoice,
+  listConversations,
+  getConversation,
+  deleteConversation,
+  deleteAllConversations,
+} from '../../lib/api'
 import { useAuth } from '../../hooks/useAuth'
 
 // Fallback, agent-flavored responses used only when the backend is unreachable
@@ -52,6 +60,33 @@ const makeSession = (agent) => ({
   showPrompts: true,
 })
 
+// Compact relative-time label for history rows (e.g. "3h ago", "2d ago").
+const relTime = (iso) => {
+  if (!iso) return ''
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return ''
+  const s = Math.max(0, Math.floor((Date.now() - then) / 1000))
+  if (s < 60) return 'Just now'
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ago`
+  const d = Math.floor(h / 24)
+  return d < 7 ? `${d}d ago` : new Date(then).toLocaleDateString()
+}
+
+// Map a persisted ConversationDetail into the panel's message shape.
+const mapMessages = (detail, agent) => {
+  const msgs = (detail?.messages || []).map((m) => ({
+    id: m.message_id || uid(),
+    role: m.role === 'user' ? 'user' : 'ai',
+    text: (m.role === 'user' ? m.question : m.response) || '',
+    evidence: Array.isArray(m.evidence) ? m.evidence : [],
+  }))
+  // Keep the agent greeting at the top for continuity with fresh chats.
+  return [{ id: uid(), role: 'ai', text: agent.greeting }, ...msgs]
+}
+
 // A full-screen chat workspace: a persistent sidebar (new chat, history,
 // agent switcher) plus a large conversation area — designed to feel like a
 // real production AI assistant.
@@ -71,6 +106,9 @@ export default function ChatPanel({ agent }) {
   const [reviewingId, setReviewingId] = useState(null)
   // Which flagged-invoice card is expanded to reveal its actions.
   const [expandedId, setExpandedId] = useState(null)
+  // History (persisted conversations) loading + clear state.
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [clearing, setClearing] = useState(false)
   const scrollRef = useRef(null)
   const timers = useRef([])
   // Per-session trace_id awaiting a clarification answer (Simulate round-trip).
@@ -92,7 +130,8 @@ export default function ChatPanel({ agent }) {
 
   const active = sessions.find((s) => s.id === activeId) || sessions[0]
 
-  // Reset the workspace when navigating to a different agent.
+  // Reset the workspace when navigating to a different agent, then hydrate the
+  // sidebar with this user's persisted conversations for the agent (BigQuery).
   useEffect(() => {
     const s = makeSession(agent)
     setSessions([s])
@@ -102,6 +141,30 @@ export default function ChatPanel({ agent }) {
     pendingTrace.current = {}
     // Clear any previously written instruction; the drone rewrites it.
     setDroneText('')
+
+    const controller = new AbortController()
+    setHistoryLoading(true)
+    listConversations({ agent: agent.slug, signal: controller.signal })
+      .then((rows) => {
+        if (!Array.isArray(rows) || rows.length === 0) return
+        const remote = rows.map((c) => ({
+          id: c.conversation_id,
+          conversationId: c.conversation_id,
+          title: c.title || 'Conversation',
+          time: relTime(c.updated_at),
+          invoiceNumber: c.invoice_number || '',
+          messages: [{ id: uid(), role: 'ai', text: agent.greeting }],
+          loaded: false,
+          showPrompts: false,
+        }))
+        // Keep the fresh "New conversation" first, then persisted history.
+        setSessions((prev) => [prev[0], ...remote])
+      })
+      .catch(() => {
+        /* history is best-effort; keep the fresh session on failure */
+      })
+      .finally(() => setHistoryLoading(false))
+    return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.slug])
 
@@ -252,9 +315,67 @@ export default function ChatPanel({ agent }) {
     delete pendingTrace.current[s.id]
   }
 
-  const selectSession = (id) => {
+  const selectSession = async (id) => {
     setActiveId(id)
     setSidebarOpen(false)
+    const s = sessions.find((x) => x.id === id)
+    // Lazily fetch the full transcript for a persisted conversation once.
+    if (s && s.conversationId && !s.loaded) {
+      try {
+        const detail = await getConversation(s.conversationId)
+        updateSession(id, (prev) => ({
+          ...prev,
+          messages: mapMessages(detail, agent),
+          loaded: true,
+        }))
+        if (s.invoiceNumber) setInvoiceNumber(s.invoiceNumber)
+      } catch {
+        // Mark as loaded so we don't retry on every click; keep the greeting.
+        updateSession(id, (prev) => ({ ...prev, loaded: true }))
+      }
+    }
+  }
+
+  // Remove a single persisted conversation (soft delete in BigQuery) and drop
+  // it from the sidebar. In-memory-only sessions are removed locally.
+  const removeConversation = async (id, e) => {
+    e?.stopPropagation?.()
+    const s = sessions.find((x) => x.id === id)
+    if (s?.conversationId) {
+      try {
+        await deleteConversation(s.conversationId)
+      } catch {
+        /* ignore; still drop locally so the UI stays responsive */
+      }
+    }
+    setSessions((prev) => {
+      const next = prev.filter((x) => x.id !== id)
+      if (next.length === 0) {
+        const fresh = makeSession(agent)
+        setActiveId(fresh.id)
+        return [fresh]
+      }
+      if (id === activeId) setActiveId(next[0].id)
+      return next
+    })
+  }
+
+  // Clear this user's entire saved chat history (all agents) in BigQuery, then
+  // reset the workspace to a single fresh conversation.
+  const clearHistory = async () => {
+    if (clearing) return
+    if (!window.confirm('Delete all your saved conversations? This cannot be undone.')) return
+    setClearing(true)
+    try {
+      await deleteAllConversations()
+    } catch {
+      /* best-effort; still reset the local workspace */
+    } finally {
+      const fresh = makeSession(agent)
+      setSessions([fresh])
+      setActiveId(fresh.id)
+      setClearing(false)
+    }
   }
 
   // Color mapping for issue severity badges.
@@ -467,13 +588,31 @@ export default function ChatPanel({ agent }) {
 
       {/* History */}
       <div className="mt-6 flex-1 overflow-y-auto px-3" data-lenis-prevent>
-        <div className="px-1 pb-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-brand-brown/40">Recent</div>
+        <div className="flex items-center justify-between px-1 pb-2">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.2em] text-brand-brown/40">Recent</span>
+          {sessions.some((s) => s.conversationId) && (
+            <button
+              onClick={clearHistory}
+              disabled={clearing}
+              className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-brand-brown/50 transition-colors hover:bg-red-500/10 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50"
+              title="Delete all saved conversations"
+            >
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+                <path d="M3 4h10M6.5 4V3h3v1M5 4l.5 9h5L11 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              {clearing ? 'Clearing…' : 'Clear'}
+            </button>
+          )}
+        </div>
+        {historyLoading && (
+          <p className="px-3 py-2 text-[11px] text-brand-brown/40">Loading history…</p>
+        )}
         <div className="space-y-1">
           {sessions.map((s) => (
-            <button
+            <div
               key={s.id}
               onClick={() => selectSession(s.id)}
-              className={`group flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm transition-colors ${
+              className={`group flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm transition-colors ${
                 s.id === activeId
                   ? 'bg-brand-gold/15 font-medium text-brand-brownDeep'
                   : 'text-brand-brown/60 hover:bg-brand-brown/[0.05] hover:text-brand-brownDeep'
@@ -482,8 +621,20 @@ export default function ChatPanel({ agent }) {
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="shrink-0 opacity-60">
                 <path d="M2 3h12v8H6l-3 3V3Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
               </svg>
-              <span className="truncate">{s.title}</span>
-            </button>
+              <span className="min-w-0 flex-1 truncate">{s.title}</span>
+              {s.conversationId && (
+                <button
+                  onClick={(e) => removeConversation(s.id, e)}
+                  className="shrink-0 rounded p-0.5 text-brand-brown/30 opacity-0 transition-opacity hover:text-red-600 group-hover:opacity-100"
+                  title="Delete conversation"
+                  aria-label="Delete conversation"
+                >
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                    <path d="M3 4h10M6.5 4V3h3v1M5 4l.5 9h5L11 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              )}
+            </div>
           ))}
         </div>
       </div>
