@@ -105,32 +105,41 @@ def _format_output(verb: Optional[Verb], output: dict) -> str:
 
     if verb is Verb.RESOLVE:
         lines = [output.get("recommendation", "").strip()]
-        for action in output.get("actions", []) or []:
+        actions = output.get("actions", []) or []
+        if actions:
+            lines.append("\n**Recommended actions:**")
+        for action in actions:
             desc = action.get("description") or action.get("action_type")
             if desc:
-                lines.append(f"• {desc}")
+                lines.append(f"- {desc}")
         return "\n".join(line for line in lines if line).strip() or "No resolution available."
 
     if verb is Verb.SIMULATE:
         lines = [output.get("projected_outcome", "").strip()]
-        for item in output.get("line_items", []) or []:
+        line_items = output.get("line_items", []) or []
+        if line_items:
+            lines.append("\n**Projected line items:**")
+        for item in line_items:
             label = item.get("label") or item.get("name") or item.get("service")
             value = item.get("amount") or item.get("value") or item.get("cost")
             if label is not None and value is not None:
-                lines.append(f"• {label}: {value}")
+                lines.append(f"- **{label}:** {value}")
         assumptions = output.get("assumptions") or []
         if assumptions:
-            lines.append("Assumptions: " + "; ".join(str(a) for a in assumptions))
+            lines.append("\n**Assumptions:**")
+            lines.extend(f"- {a}" for a in assumptions)
         return "\n".join(line for line in lines if line).strip() or "No simulation available."
 
     if verb is Verb.PREVENT:
         lines = []
         root = output.get("root_cause")
         if root:
-            lines.append(f"Root cause: {root}")
+            lines.append(f"**Root cause:** {root}")
         recs = output.get("recommendations") or []
+        if recs:
+            lines.append("\n**Recommendations:**")
         for rec in recs:
-            lines.append(f"• {rec}")
+            lines.append(f"- {rec}")
         return "\n".join(lines).strip() or "No preventive findings available."
 
     # Unknown/auto verb — best-effort flatten.

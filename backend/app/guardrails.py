@@ -86,7 +86,13 @@ async def run_output_guardrails(
         validated = model_cls.model_validate(raw_output)
         report.schema_valid = True
     except ValidationError as exc:
-        report.notes.append(f"schema validation failed: {exc.error_count()} error(s).")
+        details = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc']) or '<root>'}: {err['msg']}"
+            for err in exc.errors()
+        )
+        report.notes.append(
+            f"schema validation failed: {exc.error_count()} error(s) [{details}]."
+        )
         return None, report
 
     score = await ragas_groundedness(question, str(raw_output), contexts, settings)

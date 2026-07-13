@@ -35,16 +35,21 @@ class Complexity(str, Enum):
 
 
 class DataSource(str, Enum):
-    """Which MCP grounding source to consult for a question.
+    """Which MCP grounding source(s) to consult for a question.
 
     - ``bigquery``      : structured operational data — invoices, shipments,
                           logistics, tax, surcharges, charges, rates, amounts.
     - ``gcs_knowledge`` : documents / policies — terms, contracts, guidelines,
                           SOPs, compliance and other reference material.
+    - ``both``          : hybrid questions that need BOTH the structured numbers
+                          AND the governing policy/document (e.g. "explain the
+                          insurance/tax policy for INV0001") — consult BigQuery
+                          and the GCS knowledge store together.
     """
 
     BIGQUERY = "bigquery"
     GCS_KNOWLEDGE = "gcs_knowledge"
+    BOTH = "both"
 
 
 class Channel(str, Enum):

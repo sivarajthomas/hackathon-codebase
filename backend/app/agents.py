@@ -135,13 +135,20 @@ class ModelA:
 
         Structured operational questions (invoice/shipment/tax/surcharge/logistics)
         go to BigQuery; policy/document questions go to the GCS knowledge source.
+        When a question carries BOTH a concrete data reference AND an explicit
+        policy/document cue (e.g. "explain the tax policy for INV0001"), consult
+        BOTH sources so the answer cites the numbers and the governing policy.
         """
         q = question.lower()
         gcs_hits = sum(1 for k in _GCS_KNOWLEDGE_KEYWORDS if k in q)
         bq_hits = sum(1 for k in _BIGQUERY_KEYWORDS if k in q)
         # A concrete invoice/finding reference is always structured -> BigQuery.
-        if context.get("invoice_number") or context.get("finding_id"):
+        has_record_ref = bool(context.get("invoice_number") or context.get("finding_id"))
+        if has_record_ref:
             bq_hits += 1
+        # Hybrid: a concrete record AND an explicit policy/document cue -> both.
+        if gcs_hits and (has_record_ref or bq_hits):
+            return DataSource.BOTH
         # Prefer the knowledge source whenever an explicit policy/document cue is
         # present and it is at least as strong as the structured-data signal.
         if gcs_hits and gcs_hits >= bq_hits:
@@ -264,14 +271,22 @@ class ModelB:
 
         # --- MCP tool use (least-privilege, row-level filtered) ---
         # MCP selection is decided by the router:
-        #   * BigQuery      -> structured data (invoices, shipments, tax, surcharge, logistics)
-        #   * GCS knowledge -> policies / documents / reference material
+        #   * bigquery      -> structured data (invoices, shipments, tax, surcharge, logistics)
+        #   * gcs_knowledge -> policies / documents / reference material
+        #   * both          -> hybrid question; consult BOTH so the answer cites the
+        #                      structured numbers AND the governing policy/document
         security_scope = filters
         bq_result: dict[str, Any] = {}
         gcs_result: dict[str, Any] = {}
         contexts = [c.snippet for c in citations]
 
-        if decision.data_source is DataSource.GCS_KNOWLEDGE:
+        want_knowledge = decision.data_source in (
+            DataSource.GCS_KNOWLEDGE,
+            DataSource.BOTH,
+        )
+        want_bigquery = decision.data_source in (DataSource.BIGQUERY, DataSource.BOTH)
+
+        if want_knowledge:
             gcs_result = await self._fetch_knowledge(question, context, security_scope)
             documents = gcs_result.get("documents") or []
             for doc in documents:
@@ -288,7 +303,8 @@ class ModelB:
                         score=1.0,
                     )
                 )
-        else:
+
+        if want_bigquery:
             # Structured data: discovery-first tool-calling loop (schema discovery
             # -> execute_sql) over the live MCP servers. This mirrors the working
             # orchestrator agent and avoids the empty-result problem of guessing
