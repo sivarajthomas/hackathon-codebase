@@ -27,6 +27,8 @@ class Store:
         self._bq: Any = None
         # In-memory fallback: {table_name: [row, ...]}
         self._mem: dict[str, list[dict[str, Any]]] = {name: [] for name in REGISTRY}
+        # Cache of actual BigQuery column types: {table: {column: BQ_TYPE}}
+        self._schema_cache: dict[str, dict[str, str]] = {}
 
     # ------------------------------------------------------------------ #
     # BigQuery helpers
@@ -45,6 +47,28 @@ class Store:
         if not _SAFE_IDENT.match(table):
             raise ValueError(f"Unsafe table name: {table}")
         return f"`{self.settings.bq_project()}.{self.settings.bigquery_dataset}.{table}`"
+
+    def _table_ref(self, table: str) -> str:
+        if not _SAFE_IDENT.match(table):
+            raise ValueError(f"Unsafe table name: {table}")
+        return f"{self.settings.bq_project()}.{self.settings.bigquery_dataset}.{table}"
+
+    def _schema(self, table: str) -> dict[str, str]:
+        """Actual BigQuery column types, so INSERT params match the table.
+
+        Guards against schema drift (e.g. a column auto-detected as INT64 from
+        the sample CSV while the registry declares it float). Falls back to an
+        empty map when the table can't be read — callers then use registry types.
+        """
+        if table in self._schema_cache:
+            return self._schema_cache[table]
+        try:
+            bq_table = self._client().get_table(self._table_ref(table))
+            schema = {f.name: str(f.field_type).upper() for f in bq_table.schema}
+        except Exception:  # noqa: BLE001 - best effort; fall back to registry types
+            schema = {}
+        self._schema_cache[table] = schema
+        return schema
 
     async def _query(self, sql: str, params: Optional[list[Any]] = None) -> list[dict[str, Any]]:
         def _run() -> list[dict[str, Any]]:
@@ -84,7 +108,8 @@ class Store:
 
         cols = [c for c in spec.field_names() if c in row]
         placeholders = ", ".join(f"@{c}" for c in cols)
-        params = [self._param(spec, c, row.get(c)) for c in cols]
+        schema = self._schema(table)
+        params = [self._param(spec, schema, c, row.get(c)) for c in cols]
         sql = (
             f"INSERT INTO {self._fqn(table)} ({', '.join(cols)}) "
             f"VALUES ({placeholders})"
@@ -158,17 +183,39 @@ class Store:
         return max_seq + 1
 
     @staticmethod
-    def _param(spec: TableSpec, col: str, value: Any):
+    def _param(spec: TableSpec, schema: dict[str, str], col: str, value: Any):
         from google.cloud import bigquery
 
-        col_type = next((c.type for c in spec.columns if c.name == col), "string")
-        bq_type = {
+        # Prefer the table's real BigQuery type (guards against schema drift);
+        # fall back to the registry-declared type when the schema is unknown.
+        registry_type = next((c.type for c in spec.columns if c.name == col), "string")
+        registry_bq = {
             "int": "INT64",
             "float": "FLOAT64",
             "bool": "BOOL",
             "date": "DATE",
             "string": "STRING",
-        }.get(col_type, "STRING")
+        }.get(registry_type, "STRING")
+
+        actual = schema.get(col)
+        legacy = {"INTEGER": "INT64", "FLOAT": "FLOAT64", "BOOLEAN": "BOOL"}
+        bq_type = legacy.get(actual, actual) if actual else registry_bq
+
+        # Coerce the Python value to match the destination numeric type so a
+        # FLOAT64 value (e.g. 1880.0) can be inserted into an INT64 column.
+        if value not in (None, ""):
+            try:
+                if bq_type == "INT64":
+                    value = int(round(float(value)))
+                elif bq_type == "FLOAT64":
+                    value = float(value)
+                elif bq_type == "BOOL":
+                    value = _truthy(value)
+            except (TypeError, ValueError):
+                pass
+        elif value == "":
+            value = None
+
         return bigquery.ScalarQueryParameter(col, bq_type, value)
 
 
