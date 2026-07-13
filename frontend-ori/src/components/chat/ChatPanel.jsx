@@ -230,14 +230,14 @@ export default function ChatPanel({ agent }) {
     return turns.slice(-MAX_HISTORY_TURNS)
   }
 
-  const respondTo = async (id, text, history = []) => {
+  const respondTo = async (id, text, history = [], invoiceOverride) => {
     setTyping(true)
     try {
       const priorSession = sessions.find((s) => s.id === id) || active
       const res = await sendChatMessage({
         agent: agent.slug,
         message: text,
-        invoiceNumber: invoiceNumber.trim() || undefined,
+        invoiceNumber: (invoiceOverride ?? invoiceNumber).trim() || undefined,
         invoiceDate: invoiceDate.trim() || undefined,
         conversationId: priorSession?.conversationId || undefined,
         traceId: pendingTrace.current[id],
@@ -269,15 +269,18 @@ export default function ChatPanel({ agent }) {
     }
   }
 
-  const send = (text) => {
+  const send = (text, { invoice } = {}) => {
     const value = text.trim()
     if (!value || typing) return
-    // Invoice number is required (date stays optional).
-    if (!invoiceNumber.trim()) return
+    // Invoice number is required (date stays optional). An explicit override
+    // (e.g. clicking Explain on a flagged invoice) satisfies this even when the
+    // top invoice field is empty.
+    const inv = (invoice ?? invoiceNumber).trim()
+    if (!inv) return
     const id = activeId
     // Fold in the Invoice number / Date reference fields when provided.
     const refBits = []
-    if (invoiceNumber.trim()) refBits.push(`Invoice ${invoiceNumber.trim()}`)
+    if (inv) refBits.push(`Invoice ${inv}`)
     if (invoiceDate.trim()) refBits.push(`Date ${invoiceDate.trim()}`)
     const outgoing = refBits.length ? `${refBits.join(' · ')} — ${value}` : value
     // Capture prior turns BEFORE appending the new user message so the backend
@@ -297,7 +300,7 @@ export default function ChatPanel({ agent }) {
     setInput('')
     // Clear the drone-written instruction once the user runs their first search.
     setDroneText('')
-    respondTo(id, outgoing, history)
+    respondTo(id, outgoing, history, inv)
   }
 
   const onSubmit = (e) => {
@@ -407,13 +410,13 @@ export default function ChatPanel({ agent }) {
   )
 
   // Confirm a review: persist to BigQuery, then drop the invoice from the list.
+  // This is a silent action — it must NOT post a message into the chat.
   const reviewIssue = async (inv) => {
     if (reviewingId) return
     setReviewingId(inv.id)
     try {
       await reviewFlaggedInvoice(inv.id, { comment: `Reviewed via ${agent.name}` })
       setLiveIssues((prev) => prev.filter((r) => r.finding_id !== inv.id))
-      send(`Reviewed flagged invoice ${inv.invoice || inv.id} — ${inv.problem} (${inv.amount}).`)
       setIssuesOpen(false)
     } catch (err) {
       setIssuesError(err.message || 'Failed to review invoice.')
@@ -424,12 +427,15 @@ export default function ChatPanel({ agent }) {
 
   // Ask the agent to explain a specific flagged invoice and its issue.
   const explainIssue = (inv) => {
+    const invoiceId = inv.invoice || inv.id
+    // Reflect the flagged invoice in the reference field for context/continuity.
+    if (invoiceId) setInvoiceNumber(invoiceId)
     const parts = [
-      `Explain flagged invoice ${inv.invoice || inv.id}`,
+      `Explain flagged invoice ${invoiceId}`,
       `${inv.problem} (${inv.amount})`,
     ]
     if (inv.recommendation) parts.push(`recommended action: ${inv.recommendation}`)
-    send(`${parts.join(' — ')}. Why was it flagged and what should we do?`)
+    send(`${parts.join(' — ')}. Why was it flagged and what should we do?`, { invoice: invoiceId })
     setIssuesOpen(false)
   }
 
