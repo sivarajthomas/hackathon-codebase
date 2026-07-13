@@ -27,7 +27,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .chat_adapter import run_chat
 from .config import Settings, get_settings
-from .mcp_clients import MCPError
 from .orchestrator import Orchestrator
 from .schemas import (
     AgentFromFindingRequest,
@@ -235,7 +234,7 @@ async def prevent_review_flagged(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except MCPError as exc:
+    except Exception as exc:  # BigQuery / network failure
         raise HTTPException(
             status_code=502, detail=f"Could not update BigQuery findings store: {exc}"
         ) from exc

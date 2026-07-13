@@ -12,13 +12,14 @@ for real BigQuery calls later.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .config import Settings
-from .mcp_clients import BigQueryMCPClient, MCPError
+from .mcp_clients import BigQueryMCPClient
 from .schemas import FindingStatus, PreventFinding, UserContext
 
 logger = logging.getLogger(__name__)
@@ -42,10 +43,12 @@ class GCPClients:
         self.dlp = None
         self.vertex = None
 
-        # Live BigQuery access goes through the BigQuery MCP (read-only SELECT +
-        # DML UPDATE via execute_sql). When the MCP URL is not configured the
-        # in-memory POC store below is used instead so the flow still runs.
+        # Live BigQuery access for the findings store uses the NATIVE BigQuery
+        # client (reads + DML UPDATE). The MCP is reserved for knowledge
+        # retrieval and the agentic grounding loop. When BigQuery is not
+        # configured the in-memory POC store below is used instead.
         self.bq_mcp = BigQueryMCPClient(settings)
+        self._bq: Any = None  # lazily-created google.cloud.bigquery.Client
 
         # POC stand-in for the BigQuery findings store (finding_id -> PreventFinding).
         # Used only when the BigQuery MCP is not configured.
@@ -155,29 +158,42 @@ class GCPClients:
     # ------------------------------------------------------------------ #
     # BigQuery findings store — Prevent "invoices with issues" (live)
     # ------------------------------------------------------------------ #
+    def _bq_project(self) -> str:
+        return self.settings.bigquery_project or self.settings.gcp_project_id
+
     def _bq_configured(self) -> bool:
-        url = self.settings.bigquery_mcp_url
-        return bool(url) and url not in {"", "REPLACE_ME"}
+        """True when the native BigQuery client can be used (project + dataset set)."""
+        project = self._bq_project()
+        dataset = self.settings.bigquery_dataset
+        return bool(project and project != "REPLACE_ME" and dataset and dataset != "REPLACE_ME")
 
-    def _findings_table(self) -> str:
-        """Backtick-qualified `dataset.table` for the findings store."""
-        return f"`{self.settings.bigquery_dataset}.{self.settings.bigquery_findings_table}`"
+    def _bq_client(self) -> Any:
+        """Lazily create a native BigQuery client (reused across calls)."""
+        if self._bq is None:
+            from google.cloud import bigquery
 
-    async def _run_sql(self, sql: str, scope: UserContext) -> list[dict[str, Any]]:
-        security_scope = {
-            "contract_ids": scope.contract_ids,
-            "geo": scope.geo,
-            "currency": scope.currency,
-        }
-        result = await self.bq_mcp.call_tool("bq_query", {"sql": sql}, security_scope)
-        # ``call_tool`` fails soft and returns a placeholder carrying a ``note``
-        # key when the MCP call errored (auth/network/SQL). Distinguish that from
-        # a genuinely empty result set so callers don't mistake a failure for
-        # "no rows" (which previously surfaced as a misleading 404).
-        if isinstance(result, dict) and result.get("note"):
-            raise MCPError(f"BigQuery MCP call failed for SQL: {sql[:200]}")
-        rows = result.get("rows") if isinstance(result, dict) else result
-        return rows if isinstance(rows, list) else []
+            self._bq = bigquery.Client(project=self._bq_project())
+        return self._bq
+
+    def _findings_fqn(self) -> str:
+        """Backtick-qualified `project.dataset.table` for the findings store."""
+        return (
+            f"`{self._bq_project()}."
+            f"{self.settings.bigquery_dataset}."
+            f"{self.settings.bigquery_findings_table}`"
+        )
+
+    async def _bq_query(self, sql: str, params: Optional[list[Any]] = None) -> list[dict[str, Any]]:
+        """Run a SELECT/DML statement on the native BigQuery client off the event loop."""
+
+        def _run() -> list[dict[str, Any]]:
+            from google.cloud import bigquery
+
+            job_config = bigquery.QueryJobConfig(query_parameters=params or [])
+            job = self._bq_client().query(sql, job_config=job_config)
+            return [dict(row) for row in job.result()]
+
+        return await asyncio.to_thread(_run)
 
     @staticmethod
     def _severity(value: Any) -> str:
@@ -191,12 +207,36 @@ class GCPClients:
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _row_to_flagged(row: dict[str, Any]) -> dict[str, Any]:
+        """Map a findings_store BigQuery row to the FlaggedInvoice shape."""
+        processed = row.get("Processed")
+        if isinstance(processed, bool):
+            is_processed = processed
+        else:
+            is_processed = str(processed).strip().lower() == "true"
+        created = row.get("CreatedAt")
+        return {
+            "finding_id": str(row.get("FindingID") or ""),
+            "invoice_number": row.get("InvoiceNumber"),
+            "shipment_id": row.get("ShipmentID"),
+            "contract_number": row.get("ContractNumber"),
+            "problem": row.get("LeakageType"),
+            "amount": GCPClients._to_float(row.get("LeakageAmount")),
+            "severity": GCPClients._severity(row.get("Severity")),
+            "root_cause": row.get("RootCause"),
+            "recommendation": row.get("Recommendation"),
+            "status": str(row.get("Status") or "OPEN"),
+            "processed": is_processed,
+            "created_at": str(created) if created else None,
+        }
+
     async def list_flagged_invoices(
         self, scope: UserContext, only_unreviewed: bool = True, limit: int = 100
     ) -> list[dict[str, Any]]:
-        """Read flagged invoices (unreviewed findings) from the BigQuery findings store.
+        """Read flagged invoices (unreviewed findings) directly from BigQuery.
 
-        Falls back to the in-memory POC store when the BigQuery MCP is not wired.
+        Falls back to the in-memory POC store when BigQuery is not configured.
         """
         if not self._bq_configured():
             findings = await self.list_recent_findings(
@@ -204,48 +244,28 @@ class GCPClients:
             )
             return [self._finding_to_flagged(f) for f in findings]
 
-        where = "WHERE COALESCE(LOWER(CAST(Processed AS STRING)), 'false') != 'true'" if only_unreviewed else ""
+        where = "WHERE COALESCE(Processed, FALSE) = FALSE" if only_unreviewed else ""
         sql = (
             "SELECT FindingID, InvoiceNumber, ShipmentID, ContractNumber, "
             "LeakageType, LeakageAmount, RootCause, Recommendation, Severity, "
             "Status, Processed, CreatedAt "
-            f"FROM {self._findings_table()} {where} "
+            f"FROM {self._findings_fqn()} {where} "
             f"ORDER BY LeakageAmount DESC LIMIT {int(limit)}"
         )
         try:
-            rows = await self._run_sql(sql, scope)
+            rows = await self._bq_query(sql)
         except Exception as exc:  # pragma: no cover
             logger.warning("Flagged-invoice query failed: %s", exc)
             return []
-
-        flagged: list[dict[str, Any]] = []
-        for row in rows:
-            flagged.append(
-                {
-                    "finding_id": str(row.get("FindingID") or ""),
-                    "invoice_number": row.get("InvoiceNumber"),
-                    "shipment_id": row.get("ShipmentID"),
-                    "contract_number": row.get("ContractNumber"),
-                    "problem": row.get("LeakageType"),
-                    "amount": self._to_float(row.get("LeakageAmount")),
-                    "severity": self._severity(row.get("Severity")),
-                    "root_cause": row.get("RootCause"),
-                    "recommendation": row.get("Recommendation"),
-                    "status": str(row.get("Status") or "OPEN"),
-                    "processed": str(row.get("Processed")).strip().lower() == "true",
-                    "created_at": str(row.get("CreatedAt")) if row.get("CreatedAt") else None,
-                }
-            )
-        return flagged
+        return [self._row_to_flagged(row) for row in rows]
 
     async def review_flagged_invoice(
         self, finding_id: str, reviewer_id: str, status: FindingStatus
     ) -> Optional[dict[str, Any]]:
-        """Mark a flagged invoice as reviewed/processed in the BigQuery findings store.
+        """Mark a flagged invoice as reviewed/processed directly in BigQuery.
 
-        Reads the row first (to confirm it exists and to learn the ``Processed``
-        column type), then runs a type-correct UPDATE. Returns the reviewed
-        finding summary, or None if it does not exist.
+        Reads the row first (to confirm it exists), then runs a parameterized
+        UPDATE. Returns the reviewed finding summary, or None if it does not exist.
         """
         if not _SAFE_ID_RE.match(finding_id or ""):
             raise ValueError("Invalid finding id.")
@@ -254,48 +274,42 @@ class GCPClients:
             f = await self.mark_finding_processed(finding_id, reviewer_id, status)
             return self._finding_to_flagged(f) if f is not None else None
 
-        scope = UserContext(user_id=reviewer_id, roles=["cs"])
-        status_label = status.value.upper()
+        from google.cloud import bigquery
 
-        # 1. Read the row first. This both confirms existence (so a missing id is
-        #    a real 404) and reveals the ``Processed`` column type — CSV-loaded
-        #    tables may store it as STRING ("TRUE") or BOOL, and the UPDATE literal
-        #    must match or BigQuery rejects the DML.
+        status_label = status.value.upper()
+        fid_param = bigquery.ScalarQueryParameter("fid", "STRING", finding_id)
+
+        # 1. Confirm the row exists (a missing id is a real 404).
         select_sql = (
             "SELECT FindingID, InvoiceNumber, ShipmentID, ContractNumber, "
             "LeakageType, LeakageAmount, RootCause, Recommendation, Severity, "
             "Status, Processed, CreatedAt "
-            f"FROM {self._findings_table()} WHERE FindingID = '{finding_id}' LIMIT 1"
+            f"FROM {self._findings_fqn()} WHERE FindingID = @fid LIMIT 1"
         )
-        rows = await self._run_sql(select_sql, scope)
+        rows = await self._bq_query(select_sql, [fid_param])
         if not rows:
             return None
-        row = rows[0]
 
-        # 2. Update with a literal that matches the column type.
-        processed_literal = "TRUE" if isinstance(row.get("Processed"), bool) else "'TRUE'"
+        # 2. Update. Processed is a BOOL column, so set it to TRUE and stamp the
+        #    reviewed status. Parameterized to keep the DML injection-safe.
         update_sql = (
-            f"UPDATE {self._findings_table()} "
-            f"SET Processed = {processed_literal}, Status = '{status_label}' "
-            f"WHERE FindingID = '{finding_id}'"
+            f"UPDATE {self._findings_fqn()} "
+            "SET Processed = TRUE, Status = @status "
+            "WHERE FindingID = @fid"
         )
-        await self._run_sql(update_sql, scope)
+        await self._bq_query(
+            update_sql,
+            [
+                bigquery.ScalarQueryParameter("status", "STRING", status_label),
+                fid_param,
+            ],
+        )
 
-        # 3. Return the row with the new reviewed state (no readback needed).
-        return {
-            "finding_id": str(row.get("FindingID") or finding_id),
-            "invoice_number": row.get("InvoiceNumber"),
-            "shipment_id": row.get("ShipmentID"),
-            "contract_number": row.get("ContractNumber"),
-            "problem": row.get("LeakageType"),
-            "amount": self._to_float(row.get("LeakageAmount")),
-            "severity": self._severity(row.get("Severity")),
-            "root_cause": row.get("RootCause"),
-            "recommendation": row.get("Recommendation"),
-            "status": status_label,
-            "processed": True,
-            "created_at": str(row.get("CreatedAt")) if row.get("CreatedAt") else None,
-        }
+        # 3. Return the row with the new reviewed state.
+        reviewed = self._row_to_flagged(rows[0])
+        reviewed["status"] = status_label
+        reviewed["processed"] = True
+        return reviewed
 
     @staticmethod
     def _finding_to_flagged(f: PreventFinding) -> dict[str, Any]:

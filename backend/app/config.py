@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # --- GCP (placeholders) ---
     gcp_project_id: str = "REPLACE_ME"
     gcp_location: str = "us-central1"
+    # Project that owns the BigQuery datasets. Defaults to ``gcp_project_id`` when
+    # unset; override via BIGQUERY_PROJECT when the data lives in another project.
+    bigquery_project: str = ""
     bigquery_dataset: str = "REPLACE_ME"
     bigquery_analyzed_table: str = "analyzed_data"   # POC: pre-analyzed data (Prevent input)
     bigquery_findings_table: str = "findings_store"  # findings store (Prevent writes here)
