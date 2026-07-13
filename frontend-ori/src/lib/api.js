@@ -57,3 +57,62 @@ export async function sendChatMessage({ agent, message, invoiceNumber, traceId, 
     output: data.output ?? null,
   }
 }
+
+/**
+ * Fetch the invoices currently flagged with a billing issue (Prevent agent).
+ * These come from the live BigQuery findings store; only unreviewed findings
+ * are returned so a reviewed invoice drops off the list.
+ *
+ * @param {Object} [params]
+ * @param {string} [params.userId='cs']
+ * @param {boolean} [params.onlyUnreviewed=true]
+ * @param {AbortSignal} [params.signal]
+ * @returns {Promise<Array<Object>>} Flagged invoice records.
+ */
+export async function getFlaggedInvoices({ userId = 'cs', onlyUnreviewed = true, signal } = {}) {
+  const params = new URLSearchParams({
+    user_id: userId,
+    only_unreviewed: String(onlyUnreviewed),
+  })
+  const res = await fetch(url(`/v1/prevent/flagged?${params.toString()}`), { signal })
+  if (!res.ok) {
+    throw new Error(`Failed to load flagged invoices (${res.status})`)
+  }
+  return res.json()
+}
+
+/**
+ * Mark a flagged invoice as reviewed. Updates the BigQuery findings store so the
+ * invoice no longer appears in the flagged list.
+ *
+ * @param {string} findingId
+ * @param {Object} [params]
+ * @param {string} [params.reviewerId='cs']
+ * @param {string} [params.status='RESOLVED']
+ * @param {string} [params.comment]
+ * @param {AbortSignal} [params.signal]
+ * @returns {Promise<Object>} The reviewed invoice record.
+ */
+export async function reviewFlaggedInvoice(findingId, { reviewerId = 'cs', status = 'RESOLVED', comment, signal } = {}) {
+  const res = await fetch(url(`/v1/prevent/flagged/${encodeURIComponent(findingId)}/review`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      reviewer_id: reviewerId,
+      status,
+      ...(comment ? { comment } : {}),
+    }),
+    signal,
+  })
+  if (!res.ok) {
+    let detail = `Review failed (${res.status})`
+    try {
+      const body = await res.json()
+      if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : detail
+    } catch {
+      /* ignore non-JSON error bodies */
+    }
+    throw new Error(detail)
+  }
+  return res.json()
+}

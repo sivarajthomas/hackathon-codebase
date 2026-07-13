@@ -139,6 +139,31 @@ class Orchestrator:
         )
         return finding
 
+    # --- Prevent "invoices with issues" (live BigQuery findings store) ---
+    async def list_flagged_invoices(
+        self, scope: UserContext, only_unreviewed: bool = True
+    ) -> list[dict]:
+        """List invoices flagged with a billing issue and not yet reviewed."""
+        return await self.gcp.list_flagged_invoices(scope, only_unreviewed)
+
+    async def review_flagged_invoice(
+        self, finding_id: str, reviewer_id: str, status: FindingStatus, comment: Optional[str] = None
+    ) -> Optional[dict]:
+        """Mark a flagged invoice reviewed in BigQuery so it drops off the list."""
+        reviewed = await self.gcp.review_flagged_invoice(finding_id, reviewer_id, status)
+        if reviewed is None:
+            return None
+        await self.gcp.write_audit_log(
+            {
+                "finding_id": finding_id,
+                "action": "flagged_invoice_reviewed",
+                "reviewer_id": reviewer_id,
+                "status": status.value,
+                "comment": comment,
+            }
+        )
+        return reviewed
+
     async def resume_clarification(
         self, trace_id: str, clarify: ClarifyRequest
     ) -> Optional[ProcessResponse]:

@@ -12,6 +12,8 @@ Endpoints
   POST /v1/prevent/pubsub                   -> Pub/Sub push -> Prevent agent
   GET  /v1/prevent/findings                 -> CS 'recent findings' list (last window)
   POST /v1/prevent/findings/{id}/process    -> CS processed a finding -> flip BQ flag
+  GET  /v1/prevent/flagged                  -> Prevent UI: flagged invoices from BigQuery
+  POST /v1/prevent/flagged/{id}/review      -> CS reviewed a flagged invoice -> BQ update
   POST /v1/feedback                         -> standalone structured feedback
 """
 
@@ -34,6 +36,8 @@ from .schemas import (
     ClarifyRequest,
     CSQueueTask,
     FeedbackPayload,
+    FindingStatus,
+    FlaggedInvoice,
     HumanReviewPayload,
     PreventFinding,
     PreventPayload,
@@ -41,6 +45,7 @@ from .schemas import (
     ProcessRequest,
     ProcessResponse,
     PubSubPushEnvelope,
+    ReviewFlaggedRequest,
     UserContext,
 )
 
@@ -198,6 +203,40 @@ async def prevent_process_finding(
     if finding is None:
         raise HTTPException(status_code=404, detail="Finding not found.")
     return finding
+
+
+@app.get("/v1/prevent/flagged", response_model=list[FlaggedInvoice])
+async def prevent_flagged(
+    user_id: str = "cs",
+    only_unreviewed: bool = True,
+    orch: Orchestrator = Depends(get_orchestrator),
+) -> list[FlaggedInvoice]:
+    """Prevent UI: invoices flagged with a billing issue (from the BigQuery findings store).
+
+    Only unreviewed findings are returned by default, so a reviewed invoice
+    drops off the list on the next fetch.
+    """
+    scope = UserContext(user_id=user_id, roles=["cs"])
+    rows = await orch.list_flagged_invoices(scope, only_unreviewed)
+    return [FlaggedInvoice(**row) for row in rows]
+
+
+@app.post("/v1/prevent/flagged/{finding_id}/review", response_model=FlaggedInvoice)
+async def prevent_review_flagged(
+    finding_id: str,
+    body: ReviewFlaggedRequest,
+    orch: Orchestrator = Depends(get_orchestrator),
+) -> FlaggedInvoice:
+    """CS reviewed a flagged invoice -> mark it processed in BigQuery so it drops off the UI."""
+    try:
+        reviewed = await orch.review_flagged_invoice(
+            finding_id, body.reviewer_id, body.status, body.comment
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if reviewed is None:
+        raise HTTPException(status_code=404, detail="Flagged invoice not found.")
+    return FlaggedInvoice(**reviewed)
 
 
 @app.post("/v1/feedback")

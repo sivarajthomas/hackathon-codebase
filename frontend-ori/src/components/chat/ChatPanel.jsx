@@ -8,7 +8,7 @@ import AgentIcon from '../ui/AgentIcon'
 import UpsLogo from '../ui/UpsLogo'
 import { useTransition } from '../ui/TransitionProvider'
 import { agents } from '../../data/agents'
-import { sendChatMessage } from '../../lib/api'
+import { sendChatMessage, getFlaggedInvoices, reviewFlaggedInvoice } from '../../lib/api'
 
 // Fallback, agent-flavored responses used only when the backend is unreachable
 // so the demo stays usable offline. Live replies come from the backend API.
@@ -53,6 +53,12 @@ export default function ChatPanel({ agent }) {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [issuesOpen, setIssuesOpen] = useState(false)
   const [issueQuery, setIssueQuery] = useState('')
+  // Live flagged invoices for the Prevent agent, pulled from BigQuery via the
+  // backend. Replaces the previous hard-coded `agent.issues` sample data.
+  const [liveIssues, setLiveIssues] = useState([])
+  const [issuesLoading, setIssuesLoading] = useState(false)
+  const [issuesError, setIssuesError] = useState('')
+  const [reviewingId, setReviewingId] = useState(null)
   const scrollRef = useRef(null)
   const timers = useRef([])
   // Per-session trace_id awaiting a clarification answer (Simulate round-trip).
@@ -81,6 +87,27 @@ export default function ChatPanel({ agent }) {
     // Clear any previously written instruction; the drone rewrites it.
     setDroneText('')
     setDroneWriting(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent.slug])
+
+  // Load live flagged invoices from BigQuery for the Prevent agent. Only
+  // unreviewed findings are returned, so reviewed items drop off automatically.
+  useEffect(() => {
+    if (agent.slug !== 'prevent') {
+      setLiveIssues([])
+      setIssuesError('')
+      return
+    }
+    const controller = new AbortController()
+    setIssuesLoading(true)
+    setIssuesError('')
+    getFlaggedInvoices({ signal: controller.signal })
+      .then((rows) => setLiveIssues(Array.isArray(rows) ? rows : []))
+      .catch((err) => {
+        if (err?.name !== 'AbortError') setIssuesError(err.message || 'Failed to load flagged invoices.')
+      })
+      .finally(() => setIssuesLoading(false))
+    return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agent.slug])
 
@@ -206,30 +233,55 @@ export default function ChatPanel({ agent }) {
     low: { color: '#22c55e', bg: 'rgba(34,197,94,0.14)' },
   }
 
-  const hasIssues = Array.isArray(agent.issues) && agent.issues.length > 0
-  const flaggedTotal = hasIssues
-    ? agent.issues.reduce((sum, i) => sum + parseFloat(i.amount.replace(/[^0-9.]/g, '')), 0)
-    : 0
+  // Normalize the live BigQuery findings into the shape the panel renders.
+  const normalizedIssues = liveIssues.map((r) => {
+    const amountNum = Number.parseFloat(r.amount) || 0
+    return {
+      id: r.finding_id,
+      invoice: r.invoice_number || '',
+      problem: r.problem || 'Billing anomaly',
+      account: r.invoice_number || r.contract_number || r.shipment_id || '—',
+      amount: `$${amountNum.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      rawAmount: amountNum,
+      severity: (r.severity || 'low').toLowerCase(),
+      recommendation: r.recommendation || '',
+    }
+  })
 
-  const reviewIssue = (inv) => {
-    send(`Review flagged invoice ${inv.id} — ${inv.problem} (${inv.amount}) on account ${inv.account}.`)
-    setIssuesOpen(false)
+  const hasIssues = normalizedIssues.length > 0
+  const flaggedTotal = normalizedIssues.reduce(
+    (sum, i) => sum + (Number.parseFloat(i.rawAmount) || 0),
+    0,
+  )
+
+  // Confirm a review: persist to BigQuery, then drop the invoice from the list.
+  const reviewIssue = async (inv) => {
+    if (reviewingId) return
+    setReviewingId(inv.id)
+    try {
+      await reviewFlaggedInvoice(inv.id, { comment: `Reviewed via ${agent.name}` })
+      setLiveIssues((prev) => prev.filter((r) => r.finding_id !== inv.id))
+      send(`Reviewed flagged invoice ${inv.invoice || inv.id} — ${inv.problem} (${inv.amount}).`)
+      setIssuesOpen(false)
+    } catch (err) {
+      setIssuesError(err.message || 'Failed to review invoice.')
+    } finally {
+      setReviewingId(null)
+    }
   }
 
-  const filteredIssues = hasIssues
-    ? agent.issues.filter((inv) => {
-        const q = issueQuery.trim().toLowerCase()
-        if (!q) return true
-        return (
-          inv.id.toLowerCase().includes(q) ||
-          inv.problem.toLowerCase().includes(q) ||
-          inv.account.toLowerCase().includes(q) ||
-          inv.severity.toLowerCase().includes(q)
-        )
-      })
-    : []
+  const filteredIssues = normalizedIssues.filter((inv) => {
+    const q = issueQuery.trim().toLowerCase()
+    if (!q) return true
+    return (
+      inv.id.toLowerCase().includes(q) ||
+      inv.problem.toLowerCase().includes(q) ||
+      inv.account.toLowerCase().includes(q) ||
+      inv.severity.toLowerCase().includes(q)
+    )
+  })
 
-  const IssuesPanel = hasIssues ? (
+  const IssuesPanel = agent.slug === 'prevent' ? (
     <div className="flex h-full flex-col">
       <div className="border-b border-brand-brown/10 px-4 py-4">
         <div className="flex items-center gap-2">
@@ -237,7 +289,9 @@ export default function ChatPanel({ agent }) {
           <h3 className="text-sm font-semibold text-brand-brownDeep">Invoices with issues</h3>
         </div>
         <p className="mt-1 text-[11px] text-brand-brown/50">
-          {agent.issues.length} flagged · ${flaggedTotal.toFixed(2)} at risk
+          {issuesLoading
+            ? 'Loading from BigQuery…'
+            : `${normalizedIssues.length} flagged · $${flaggedTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} at risk`}
         </p>
         {/* Search */}
         <div className="mt-3 flex items-center gap-2 rounded-lg border border-brand-brown/12 bg-white px-2.5 py-1.5 focus-within:border-brand-gold">
@@ -265,19 +319,27 @@ export default function ChatPanel({ agent }) {
         </div>
       </div>
       <div className="flex-1 space-y-2 overflow-y-auto p-3">
-        {filteredIssues.length === 0 && (
-          <p className="px-2 py-6 text-center text-xs text-brand-brown/40">No matching invoices.</p>
+        {issuesLoading && (
+          <p className="px-2 py-6 text-center text-xs text-brand-brown/40">Loading flagged invoices…</p>
         )}
-        {filteredIssues.map((inv) => {
+        {!issuesLoading && issuesError && (
+          <p className="px-2 py-6 text-center text-xs text-red-500">{issuesError}</p>
+        )}
+        {!issuesLoading && !issuesError && filteredIssues.length === 0 && (
+          <p className="px-2 py-6 text-center text-xs text-brand-brown/40">
+            {normalizedIssues.length === 0 ? 'No invoices flagged. All clear.' : 'No matching invoices.'}
+          </p>
+        )}
+        {!issuesLoading && filteredIssues.map((inv) => {
           const s = severityStyle[inv.severity] || severityStyle.low
+          const isReviewing = reviewingId === inv.id
           return (
-            <button
+            <div
               key={inv.id}
-              onClick={() => reviewIssue(inv)}
-              className="w-full rounded-xl border border-brand-brown/10 bg-white p-3 text-left shadow-sm transition-colors hover:border-brand-gold"
+              className="w-full rounded-xl border border-brand-brown/10 bg-white p-3 text-left shadow-sm"
             >
               <div className="flex items-center justify-between">
-                <span className="font-mono text-xs font-semibold text-brand-brownDeep">{inv.id}</span>
+                <span className="font-mono text-xs font-semibold text-brand-brownDeep">{inv.invoice || inv.id}</span>
                 <span
                   className="rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide"
                   style={{ color: s.color, background: s.bg }}
@@ -286,16 +348,26 @@ export default function ChatPanel({ agent }) {
                 </span>
               </div>
               <div className="mt-1.5 text-xs text-brand-brown/70">{inv.problem}</div>
+              {inv.recommendation && (
+                <div className="mt-1 text-[11px] text-brand-brown/50">{inv.recommendation}</div>
+              )}
               <div className="mt-2 flex items-center justify-between text-[11px] text-brand-brown/50">
                 <span>Account {inv.account}</span>
                 <span className="font-semibold text-brand-brownDeep">{inv.amount}</span>
               </div>
-            </button>
+              <button
+                onClick={() => reviewIssue(inv)}
+                disabled={isReviewing}
+                className="mt-3 w-full rounded-lg bg-brand-brownDeep px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-brand-gold hover:text-brand-brownDeep disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isReviewing ? 'Confirming…' : 'Review & confirm'}
+              </button>
+            </div>
           )
         })}
       </div>
       <div className="border-t border-brand-brown/10 px-4 py-3 text-center text-[10px] text-brand-brown/40">
-        Tap an invoice to review it with {agent.name}
+        Confirm a review to update BigQuery and clear it from the list
       </div>
     </div>
   ) : null
@@ -445,7 +517,7 @@ export default function ChatPanel({ agent }) {
                 <span className="h-1.5 w-1.5 animate-pulseGlow rounded-full bg-red-500" />
                 Issues
                 <span className="rounded-full bg-red-500 px-1.5 text-[10px] font-bold text-white">
-                  {agent.issues.length}
+                  {normalizedIssues.length}
                 </span>
               </button>
             )}
@@ -523,7 +595,7 @@ export default function ChatPanel({ agent }) {
       </div>
 
       {/* Right sidebar: flagged invoices (Prevent Agent). Static on xl+. */}
-      {hasIssues && (
+      {agent.slug === 'prevent' && (
         <aside className="hidden w-80 shrink-0 border-l border-brand-brown/10 bg-white/90 backdrop-blur-2xl xl:block">
           {IssuesPanel}
         </aside>
@@ -531,7 +603,7 @@ export default function ChatPanel({ agent }) {
 
       {/* Right sidebar as a slide-in drawer on smaller screens */}
       <AnimatePresence>
-        {hasIssues && issuesOpen && (
+        {agent.slug === 'prevent' && issuesOpen && (
           <>
             <motion.div
               initial={{ opacity: 0 }}

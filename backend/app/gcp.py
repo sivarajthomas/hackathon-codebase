@@ -12,11 +12,20 @@ for real BigQuery calls later.
 
 from __future__ import annotations
 
+import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from .config import Settings
+from .mcp_clients import BigQueryMCPClient
 from .schemas import FindingStatus, PreventFinding, UserContext
+
+logger = logging.getLogger(__name__)
+
+# Finding ids are system-generated (e.g. "PF-0001"); restrict to a safe charset
+# so they can be embedded in a SQL UPDATE without injection risk.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 
 
 class GCPClients:
@@ -33,9 +42,13 @@ class GCPClients:
         self.dlp = None
         self.vertex = None
 
+        # Live BigQuery access goes through the BigQuery MCP (read-only SELECT +
+        # DML UPDATE via execute_sql). When the MCP URL is not configured the
+        # in-memory POC store below is used instead so the flow still runs.
+        self.bq_mcp = BigQueryMCPClient(settings)
+
         # POC stand-in for the BigQuery findings store (finding_id -> PreventFinding).
-        # TODO(placeholder): replace with reads/writes against
-        #   `{gcp_project_id}.{bigquery_dataset}.{bigquery_findings_table}`.
+        # Used only when the BigQuery MCP is not configured.
         self._findings: dict[str, PreventFinding] = {}
 
     # ------------------------------------------------------------------ #
@@ -138,3 +151,155 @@ class GCPClients:
     async def write_audit_log(self, record: dict[str, Any]) -> None:
         # TODO(placeholder): append to BigQuery audit table / Cloud Logging.
         return None
+
+    # ------------------------------------------------------------------ #
+    # BigQuery findings store — Prevent "invoices with issues" (live)
+    # ------------------------------------------------------------------ #
+    def _bq_configured(self) -> bool:
+        url = self.settings.bigquery_mcp_url
+        return bool(url) and url not in {"", "REPLACE_ME"}
+
+    def _findings_table(self) -> str:
+        """Backtick-qualified `dataset.table` for the findings store."""
+        return f"`{self.settings.bigquery_dataset}.{self.settings.bigquery_findings_table}`"
+
+    async def _run_sql(self, sql: str, scope: UserContext) -> list[dict[str, Any]]:
+        security_scope = {
+            "contract_ids": scope.contract_ids,
+            "geo": scope.geo,
+            "currency": scope.currency,
+        }
+        result = await self.bq_mcp.call_tool("bq_query", {"sql": sql}, security_scope)
+        rows = result.get("rows") if isinstance(result, dict) else result
+        return rows if isinstance(rows, list) else []
+
+    @staticmethod
+    def _severity(value: Any) -> str:
+        s = str(value or "").strip().lower()
+        return s if s in {"high", "medium", "low"} else "low"
+
+    @staticmethod
+    def _to_float(value: Any) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def list_flagged_invoices(
+        self, scope: UserContext, only_unreviewed: bool = True, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Read flagged invoices (unreviewed findings) from the BigQuery findings store.
+
+        Falls back to the in-memory POC store when the BigQuery MCP is not wired.
+        """
+        if not self._bq_configured():
+            findings = await self.list_recent_findings(
+                self.settings.prevent_findings_window_minutes, only_unreviewed, scope
+            )
+            return [self._finding_to_flagged(f) for f in findings]
+
+        where = "WHERE COALESCE(LOWER(CAST(Processed AS STRING)), 'false') != 'true'" if only_unreviewed else ""
+        sql = (
+            "SELECT FindingID, InvoiceNumber, ShipmentID, ContractNumber, "
+            "LeakageType, LeakageAmount, RootCause, Recommendation, Severity, "
+            "Status, Processed, CreatedAt "
+            f"FROM {self._findings_table()} {where} "
+            f"ORDER BY LeakageAmount DESC LIMIT {int(limit)}"
+        )
+        try:
+            rows = await self._run_sql(sql, scope)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Flagged-invoice query failed: %s", exc)
+            return []
+
+        flagged: list[dict[str, Any]] = []
+        for row in rows:
+            flagged.append(
+                {
+                    "finding_id": str(row.get("FindingID") or ""),
+                    "invoice_number": row.get("InvoiceNumber"),
+                    "shipment_id": row.get("ShipmentID"),
+                    "contract_number": row.get("ContractNumber"),
+                    "problem": row.get("LeakageType"),
+                    "amount": self._to_float(row.get("LeakageAmount")),
+                    "severity": self._severity(row.get("Severity")),
+                    "root_cause": row.get("RootCause"),
+                    "recommendation": row.get("Recommendation"),
+                    "status": str(row.get("Status") or "OPEN"),
+                    "processed": str(row.get("Processed")).strip().lower() == "true",
+                    "created_at": str(row.get("CreatedAt")) if row.get("CreatedAt") else None,
+                }
+            )
+        return flagged
+
+    async def review_flagged_invoice(
+        self, finding_id: str, reviewer_id: str, status: FindingStatus
+    ) -> Optional[dict[str, Any]]:
+        """Mark a flagged invoice as reviewed/processed in the BigQuery findings store.
+
+        Returns the reviewed finding summary, or None if it does not exist.
+        """
+        if not _SAFE_ID_RE.match(finding_id or ""):
+            raise ValueError("Invalid finding id.")
+
+        if not self._bq_configured():
+            f = await self.mark_finding_processed(finding_id, reviewer_id, status)
+            return self._finding_to_flagged(f) if f is not None else None
+
+        status_label = status.value.upper()
+        update_sql = (
+            f"UPDATE {self._findings_table()} "
+            f"SET Processed = TRUE, Status = '{status_label}' "
+            f"WHERE FindingID = '{finding_id}'"
+        )
+        try:
+            await self._run_sql(update_sql, UserContext(user_id=reviewer_id, roles=["cs"]))
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Flagged-invoice review update failed: %s", exc)
+            raise
+
+        # Read back the updated row so the UI can confirm the new state.
+        read_sql = (
+            "SELECT FindingID, InvoiceNumber, ShipmentID, ContractNumber, "
+            "LeakageType, LeakageAmount, RootCause, Recommendation, Severity, "
+            "Status, Processed, CreatedAt "
+            f"FROM {self._findings_table()} WHERE FindingID = '{finding_id}' LIMIT 1"
+        )
+        rows = await self._run_sql(read_sql, UserContext(user_id=reviewer_id, roles=["cs"]))
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "finding_id": str(row.get("FindingID") or finding_id),
+            "invoice_number": row.get("InvoiceNumber"),
+            "shipment_id": row.get("ShipmentID"),
+            "contract_number": row.get("ContractNumber"),
+            "problem": row.get("LeakageType"),
+            "amount": self._to_float(row.get("LeakageAmount")),
+            "severity": self._severity(row.get("Severity")),
+            "root_cause": row.get("RootCause"),
+            "recommendation": row.get("Recommendation"),
+            "status": str(row.get("Status") or status_label),
+            "processed": str(row.get("Processed")).strip().lower() == "true",
+            "created_at": str(row.get("CreatedAt")) if row.get("CreatedAt") else None,
+        }
+
+    @staticmethod
+    def _finding_to_flagged(f: PreventFinding) -> dict[str, Any]:
+        """Adapt an in-memory PreventFinding to the flagged-invoice shape (POC fallback)."""
+        output = f.output or {}
+        recs = output.get("recommendations") or []
+        return {
+            "finding_id": f.finding_id,
+            "invoice_number": f.invoice_number,
+            "shipment_id": None,
+            "contract_number": None,
+            "problem": output.get("root_cause"),
+            "amount": 0.0,
+            "severity": "medium",
+            "root_cause": output.get("root_cause"),
+            "recommendation": recs[0] if recs else None,
+            "status": f.status.value.upper(),
+            "processed": f.processed,
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+        }

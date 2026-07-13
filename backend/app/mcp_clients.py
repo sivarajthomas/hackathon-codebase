@@ -204,5 +204,29 @@ class GCSMCPClient:
             return {"key": key, "content": "", "scope_applied": security_scope,
                     "note": "[PLACEHOLDER] GCS knowledge read."}
         payload = self._unwrap(data)
-        content = payload.get("content") if isinstance(payload, dict) and "content" in payload else payload
+        content = self._extract_text(payload)
         return {"key": key, "content": content, "scope_applied": security_scope}
+
+    @staticmethod
+    def _extract_text(payload: Any) -> str:
+        """Pull readable text out of the knowledge-read envelope.
+
+        The GCS MCP returns text files as ``{"kind": "text", "text": "..."}`` and
+        parsed JSON/CSV as ``{"kind": ..., "rows": [...]}``. Older/plain shapes may
+        use ``content``. Normalize all of these to a single string.
+        """
+        if isinstance(payload, str):
+            return payload
+        if not isinstance(payload, dict):
+            return "" if payload is None else str(payload)
+        for field in ("text", "content"):
+            value = payload.get(field)
+            if isinstance(value, str) and value.strip():
+                return value
+        rows = payload.get("rows")
+        if isinstance(rows, list) and rows:
+            return json.dumps(rows, ensure_ascii=False, default=str)
+        sheets = payload.get("sheets")
+        if sheets:
+            return json.dumps(sheets, ensure_ascii=False, default=str)
+        return ""

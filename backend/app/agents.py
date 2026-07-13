@@ -88,6 +88,20 @@ _GCS_KNOWLEDGE_KEYWORDS: tuple[str, ...] = (
     "faq", "manual", "reference", "standard", "how do i", "what is the policy",
 )
 
+# Loose invoice/finding identifier cue used to detect a concrete record in the
+# raw question text (e.g. "INV0001", "SHP-0005", "PF0003").
+_RECORD_REF_RE = re.compile(r"\b[A-Za-z]{2,5}-?\d{3,}\b")
+
+# System prompt for the GCS knowledge file-selection step (discovery-first):
+# the model sees the full object catalogue and picks which path(s) to read.
+_KNOWLEDGE_SELECT_SYSTEM = (
+    "You are a retrieval planner for a document knowledge store. You are given a "
+    "user question and a catalogue of document object paths. Select only the "
+    "paths whose contents are most likely to answer the question. Never invent "
+    "paths; choose exactly from the catalogue. Prefer precision over recall and "
+    "return at most three paths as JSON."
+)
+
 
 class ModelA:
     """Intent + complexity router."""
@@ -214,6 +228,21 @@ class ModelA:
         if data_source is None:
             data_source = self._classify_data_source(question, context)
 
+        # Deterministic upgrade to BOTH: a policy/document cue combined with a
+        # concrete record reference needs the structured numbers AND the governing
+        # policy, even if the LLM router picked a single source.
+        if data_source is not DataSource.BOTH:
+            q = question.lower()
+            has_policy_cue = any(k in q for k in _GCS_KNOWLEDGE_KEYWORDS)
+            has_record_ref = bool(
+                context.get("invoice_number")
+                or context.get("finding_id")
+                or _RECORD_REF_RE.search(question)
+            )
+            if has_policy_cue and has_record_ref:
+                data_source = DataSource.BOTH
+                logger.info("Model-A router: upgraded data_source to 'both' (policy + record).")
+
         missing: list[str] = []
         clarification = None
         if verb is Verb.SIMULATE and not scenario_params:
@@ -329,11 +358,77 @@ class ModelB:
         context: dict[str, Any],
         security_scope: dict[str, Any],
     ) -> dict[str, Any]:
-        """Read the most relevant policy/reference documents from the GCS MCP."""
+        """Discovery-first knowledge grounding over the GCS MCP.
+
+        Mirrors the BigQuery agentic pattern: the GCS MCP exposes ALL knowledge
+        objects via ``knowledge_list_files``; the LLM then picks which object
+        path(s) are relevant to the question, and we read only those via
+        ``knowledge_read_file``. Falls back to deterministic keyword ranking when
+        the model is unavailable.
+        """
         listing = await self.gcs_mcp.list_knowledge_files(security_scope)
         files = listing.get("files") or []
+        if not files:
+            return {"documents": [], "listed": []}
 
-        # Rank files by keyword overlap with the question; fall back to first few.
+        # 1. LLM picks the relevant object path(s) from the full catalogue.
+        selected = await self._select_knowledge_files(question, files)
+        # 2. Deterministic keyword fallback when the model returns nothing usable.
+        if not selected:
+            selected = self._rank_knowledge_files(question, files)
+
+        # 3. Read the selected object(s).
+        documents: list[dict[str, Any]] = []
+        for key in selected:
+            read = await self.gcs_mcp.read_knowledge_file(key, security_scope)
+            content = read.get("content") or ""
+            if content:
+                documents.append({"key": key, "content": content})
+
+        # 4. Last-resort: if nothing readable was selected, read the first file(s).
+        if not documents:
+            for key in files[:2]:
+                read = await self.gcs_mcp.read_knowledge_file(key, security_scope)
+                content = read.get("content") or ""
+                if content:
+                    documents.append({"key": key, "content": content})
+
+        return {"documents": documents, "listed": files, "selected": selected}
+
+    async def _select_knowledge_files(self, question: str, files: list[str]) -> list[str]:
+        """Ask the LLM which knowledge object path(s) best answer the question."""
+        catalogue = "\n".join(f"- {f}" for f in files[:200])
+        prompt = (
+            f"Question: {question}\n\n"
+            f"Available knowledge documents (object paths):\n{catalogue}\n\n"
+            "Choose the 1-3 document paths whose contents best answer the question. "
+            'Return JSON {"keys": ["exact/path", ...]} using paths exactly as listed. '
+            "If none are relevant, return an empty list."
+        )
+        try:
+            llm = await invoke_llm(
+                self.settings,
+                model_id=self.settings.grounding_model_id,
+                system=_KNOWLEDGE_SELECT_SYSTEM,
+                messages=[{"role": "user", "content": prompt}],
+                response_schema={
+                    "type": "object",
+                    "properties": {"keys": {"type": "array", "items": {"type": "string"}}},
+                },
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Knowledge file selection failed: %s", exc)
+            return []
+        structured = llm.get("structured") or {}
+        keys = structured.get("keys")
+        if not isinstance(keys, list):
+            return []
+        available = set(files)
+        return [k for k in keys if isinstance(k, str) and k in available][:3]
+
+    @staticmethod
+    def _rank_knowledge_files(question: str, files: list[str]) -> list[str]:
+        """Keyword-overlap ranking used when LLM selection is unavailable."""
         tokens = {t for t in re.findall(r"[a-z0-9]{4,}", question.lower())}
 
         def score(key: str) -> int:
@@ -341,13 +436,7 @@ class ModelB:
             return sum(1 for t in tokens if t in low)
 
         ranked = sorted(files, key=score, reverse=True)
-        selected = [f for f in ranked if score(f) > 0][:3] or ranked[:2]
-
-        documents: list[dict[str, Any]] = []
-        for key in selected:
-            read = await self.gcs_mcp.read_knowledge_file(key, security_scope)
-            documents.append({"key": key, "content": read.get("content", "")})
-        return {"documents": documents, "listed": files}
+        return [f for f in ranked if score(f) > 0][:3] or ranked[:2]
 
     async def _agentic_fetch(
         self,

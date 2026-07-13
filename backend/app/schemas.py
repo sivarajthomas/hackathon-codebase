@@ -286,6 +286,36 @@ class ProcessFindingRequest(BaseModel):
     comment: Optional[str] = None
 
 
+class FlaggedInvoice(BaseModel):
+    """A row from the BigQuery findings store, shaped for the Prevent UI sidebar.
+
+    Represents an invoice flagged with a potential billing issue that a CS
+    person still needs to review. Once reviewed it is marked processed in
+    BigQuery and drops off the list.
+    """
+
+    finding_id: str
+    invoice_number: Optional[str] = None
+    shipment_id: Optional[str] = None
+    contract_number: Optional[str] = None
+    problem: Optional[str] = None          # LeakageType
+    amount: float = 0.0                     # LeakageAmount
+    severity: str = "low"                   # high | medium | low
+    root_cause: Optional[str] = None
+    recommendation: Optional[str] = None
+    status: str = "OPEN"
+    processed: bool = False
+    created_at: Optional[str] = None
+
+
+class ReviewFlaggedRequest(BaseModel):
+    """CS reviews a flagged invoice -> mark it processed in the findings store."""
+
+    reviewer_id: str = "cs"
+    status: FindingStatus = FindingStatus.RESOLVED
+    comment: Optional[str] = None
+
+
 # --------------------------------------------------------------------------- #
 # Evidence / citations
 # --------------------------------------------------------------------------- #
