@@ -59,6 +59,8 @@ export default function ChatPanel({ agent }) {
   const [issuesLoading, setIssuesLoading] = useState(false)
   const [issuesError, setIssuesError] = useState('')
   const [reviewingId, setReviewingId] = useState(null)
+  // Which flagged-invoice card is expanded to reveal its actions.
+  const [expandedId, setExpandedId] = useState(null)
   const scrollRef = useRef(null)
   const timers = useRef([])
   // Per-session trace_id awaiting a clarification answer (Simulate round-trip).
@@ -270,6 +272,17 @@ export default function ChatPanel({ agent }) {
     }
   }
 
+  // Ask the agent to explain a specific flagged invoice and its issue.
+  const explainIssue = (inv) => {
+    const parts = [
+      `Explain flagged invoice ${inv.invoice || inv.id}`,
+      `${inv.problem} (${inv.amount})`,
+    ]
+    if (inv.recommendation) parts.push(`recommended action: ${inv.recommendation}`)
+    send(`${parts.join(' — ')}. Why was it flagged and what should we do?`)
+    setIssuesOpen(false)
+  }
+
   const filteredIssues = normalizedIssues.filter((inv) => {
     const q = issueQuery.trim().toLowerCase()
     if (!q) return true
@@ -333,41 +346,66 @@ export default function ChatPanel({ agent }) {
         {!issuesLoading && filteredIssues.map((inv) => {
           const s = severityStyle[inv.severity] || severityStyle.low
           const isReviewing = reviewingId === inv.id
+          const isExpanded = expandedId === inv.id
           return (
             <div
               key={inv.id}
-              className="w-full rounded-xl border border-brand-brown/10 bg-white p-3 text-left shadow-sm"
+              className={`w-full rounded-xl border bg-white p-3 text-left shadow-sm transition-colors ${
+                isExpanded ? 'border-brand-gold' : 'border-brand-brown/10 hover:border-brand-gold/60'
+              }`}
             >
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-xs font-semibold text-brand-brownDeep">{inv.invoice || inv.id}</span>
-                <span
-                  className="rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide"
-                  style={{ color: s.color, background: s.bg }}
-                >
-                  {inv.severity}
-                </span>
-              </div>
-              <div className="mt-1.5 text-xs text-brand-brown/70">{inv.problem}</div>
-              {inv.recommendation && (
-                <div className="mt-1 text-[11px] text-brand-brown/50">{inv.recommendation}</div>
-              )}
-              <div className="mt-2 flex items-center justify-between text-[11px] text-brand-brown/50">
-                <span>Account {inv.account}</span>
-                <span className="font-semibold text-brand-brownDeep">{inv.amount}</span>
-              </div>
               <button
-                onClick={() => reviewIssue(inv)}
-                disabled={isReviewing}
-                className="mt-3 w-full rounded-lg bg-brand-brownDeep px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-brand-gold hover:text-brand-brownDeep disabled:cursor-not-allowed disabled:opacity-60"
+                type="button"
+                onClick={() => setExpandedId(isExpanded ? null : inv.id)}
+                className="w-full text-left"
+                aria-expanded={isExpanded}
               >
-                {isReviewing ? 'Confirming…' : 'Review & confirm'}
+                <div className="flex items-center justify-between">
+                  <span className="font-mono text-xs font-semibold text-brand-brownDeep">{inv.invoice || inv.id}</span>
+                  <span
+                    className="rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide"
+                    style={{ color: s.color, background: s.bg }}
+                  >
+                    {inv.severity}
+                  </span>
+                </div>
+                <div className="mt-1.5 text-xs text-brand-brown/70">{inv.problem}</div>
+                <div className="mt-2 flex items-center justify-between text-[11px] text-brand-brown/50">
+                  <span>Account {inv.account}</span>
+                  <span className="font-semibold text-brand-brownDeep">{inv.amount}</span>
+                </div>
               </button>
+              {isExpanded && (
+                <div className="mt-3 border-t border-brand-brown/10 pt-3">
+                  {inv.recommendation && (
+                    <p className="mb-2 text-[11px] text-brand-brown/60">
+                      <span className="font-semibold text-brand-brownDeep">Recommended: </span>
+                      {inv.recommendation}
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => explainIssue(inv)}
+                      className="flex-1 rounded-lg border border-brand-brown/15 bg-white px-3 py-2 text-xs font-semibold text-brand-brownDeep transition-colors hover:border-brand-gold hover:bg-brand-gold/10"
+                    >
+                      Explain
+                    </button>
+                    <button
+                      onClick={() => reviewIssue(inv)}
+                      disabled={isReviewing}
+                      className="flex-1 rounded-lg bg-brand-brownDeep px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-brand-gold hover:text-brand-brownDeep disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isReviewing ? 'Confirming…' : 'Review & confirm'}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )
         })}
       </div>
       <div className="border-t border-brand-brown/10 px-4 py-3 text-center text-[10px] text-brand-brown/40">
-        Confirm a review to update BigQuery and clear it from the list
+        Tap an invoice to explain it or confirm a review (updates BigQuery)
       </div>
     </div>
   ) : null

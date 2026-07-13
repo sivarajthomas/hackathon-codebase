@@ -243,6 +243,26 @@ class ModelA:
                 data_source = DataSource.BOTH
                 logger.info("Model-A router: upgraded data_source to 'both' (policy + record).")
 
+        # Deterministic downgrade to GCS_KNOWLEDGE: a clear policy/document
+        # question with NO concrete record reference and no structured-data cue
+        # should be answered from the knowledge base, even if the LLM router (or
+        # heuristic) leaned toward BigQuery. This keeps pure policy questions off
+        # the BigQuery-only agentic path, which cannot read documents.
+        if data_source is DataSource.BIGQUERY:
+            q = question.lower()
+            has_policy_cue = any(k in q for k in _GCS_KNOWLEDGE_KEYWORDS)
+            has_record_ref = bool(
+                context.get("invoice_number")
+                or context.get("finding_id")
+                or _RECORD_REF_RE.search(question)
+            )
+            bq_hits = sum(1 for k in _BIGQUERY_KEYWORDS if k in q)
+            if has_policy_cue and not has_record_ref and bq_hits == 0:
+                data_source = DataSource.GCS_KNOWLEDGE
+                logger.info(
+                    "Model-A router: downgraded data_source to 'gcs_knowledge' (policy, no record)."
+                )
+
         missing: list[str] = []
         clarification = None
         if verb is Verb.SIMULATE and not scenario_params:

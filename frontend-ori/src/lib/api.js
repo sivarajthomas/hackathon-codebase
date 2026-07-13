@@ -88,12 +88,12 @@ export async function getFlaggedInvoices({ userId = 'cs', onlyUnreviewed = true,
  * @param {string} findingId
  * @param {Object} [params]
  * @param {string} [params.reviewerId='cs']
- * @param {string} [params.status='RESOLVED']
+ * @param {string} [params.status='resolved']
  * @param {string} [params.comment]
  * @param {AbortSignal} [params.signal]
  * @returns {Promise<Object>} The reviewed invoice record.
  */
-export async function reviewFlaggedInvoice(findingId, { reviewerId = 'cs', status = 'RESOLVED', comment, signal } = {}) {
+export async function reviewFlaggedInvoice(findingId, { reviewerId = 'cs', status = 'resolved', comment, signal } = {}) {
   const res = await fetch(url(`/v1/prevent/flagged/${encodeURIComponent(findingId)}/review`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

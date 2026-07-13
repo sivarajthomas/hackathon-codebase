@@ -12,7 +12,7 @@ substitutions:
   _REGION: us-central1
   _REPO: mcp-servers
   _SERVICE: gcs-mcp
-  _GCS_BUCKET: gcp-mcp-config-docs
+  _GCS_BUCKET: invoice-policy-knowledge-documents
 
 steps:
   - id: build

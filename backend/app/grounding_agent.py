@@ -73,6 +73,19 @@ ANSWERING RULES:
 3. Respond in clear, concise natural language suitable for a business user.
 """
 
+# Same as ``_SYSTEM_INSTRUCTION`` but WITHOUT the DOCUMENTS paragraph. Used when
+# only the BigQuery server is connected so the model is never told about (and
+# therefore never hallucinates a call to) the GCS knowledge tools, which would
+# fail with an "unknown tool" error and waste a tool-calling iteration.
+_SYSTEM_INSTRUCTION_NO_DOCS = _SYSTEM_INSTRUCTION.replace(
+    """DOCUMENTS: use the knowledge tools (`knowledge_list_files`,
+`knowledge_read_file`) only for policy / contract / PDF documents, never for
+structured figures.
+
+""",
+    "",
+)
+
 
 # --------------------------------------------------------------------------- #
 # JSON-Schema -> Gemini function declaration (ported from schema_convert.py)
@@ -368,7 +381,11 @@ async def gather_evidence(
             types.Content(role="user", parts=[types.Part.from_text(text=question)])
         )
         config = types.GenerateContentConfig(
-            system_instruction=_SYSTEM_INSTRUCTION,
+            system_instruction=(
+                _SYSTEM_INSTRUCTION
+                if "gcs" in hub._sessions
+                else _SYSTEM_INSTRUCTION_NO_DOCS
+            ),
             temperature=0.0,
             tools=tools or None,
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
