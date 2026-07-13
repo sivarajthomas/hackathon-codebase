@@ -8,7 +8,7 @@
 substitutions:
   _REGION: us-central1
   _SERVICE: invoice-intake-backend
-  _REPO: cloud-run-source-deploy
+  _REPO: mcp-servers
 
 steps:
   - name: gcr.io/cloud-builders/docker
