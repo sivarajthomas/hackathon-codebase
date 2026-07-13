@@ -1,0 +1,39 @@
+# Build + deploy the Invoice-Intake + Prevent backend to Cloud Run.
+#
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_SERVICE=invoice-intake-backend
+#
+# Set runtime config after deploy (or here via --set-env-vars):
+#   GCP_PROJECT_ID, BIGQUERY_DATASET, PUBSUB_TOPIC
+substitutions:
+  _REGION: us-central1
+  _SERVICE: invoice-intake-backend
+  _REPO: cloud-run-source-deploy
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --service-account=cloud-run-sa@project-00c7b34c-acc0-4431-afb.iam.gserviceaccount.com
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+options:
+  logging: CLOUD_LOGGING_ONLY
