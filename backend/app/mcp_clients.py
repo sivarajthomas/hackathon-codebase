@@ -72,6 +72,27 @@ def _parse_tool_result(result: Any) -> Any:
     return parsed[0] if len(parsed) == 1 else parsed
 
 
+def _normalize_rows(data: Any) -> list[Any]:
+    """Normalize an ``execute_sql`` result into a list of row dicts.
+
+    The BigQuery MCP returns a JSON array for multi-row results (parsed as a
+    ``list``) but a bare JSON object for a SINGLE row. A single-row object has no
+    ``rows`` key, so the previous ``data.get("rows")`` collapsed it to ``[]`` —
+    which made ``SELECT ... LIMIT 1`` look like "no rows" (a spurious 404). Treat
+    a lone row dict as one row; only unwrap a dict that is an explicit
+    ``{"rows": [...]}`` envelope.
+    """
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        if "rows" in data and isinstance(data["rows"], list):
+            return data["rows"]
+        return [data]  # single row returned as an object
+    return [data]
+
+
 async def _call_mcp_tool(
     base_url: str,
     tool_name: str,
@@ -146,8 +167,7 @@ class BigQueryMCPClient:
             logger.warning("BigQuery MCP call failed (%s): %s", tool_name, exc)
             return placeholder
 
-        rows = data if isinstance(data, list) else (data.get("rows") if isinstance(data, dict) else data)
-        return {"tool": tool_name, "rows": rows or [], "scope_applied": security_scope}
+        return {"tool": tool_name, "rows": _normalize_rows(data), "scope_applied": security_scope}
 
 
 class GCSMCPClient:
