@@ -1,0 +1,42 @@
+# Build + deploy the Invoice-Intake frontend to Cloud Run.
+#
+# Run from the repository root (hackathon-codebase/):
+#   gcloud builds submit . --config invoice-intake/frontend/cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_SERVICE=invoice-intake-frontend,_API_BASE=https://<backend-url>
+substitutions:
+  _REGION: us-central1
+  _SERVICE: invoice-intake-frontend
+  _REPO: mcp-servers
+  _API_BASE: "https://invoice-intake-backend-836378136559.us-central1.run.app"
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - invoice-intake/frontend/Dockerfile
+      - --build-arg
+      - VITE_API_BASE=${_API_BASE}
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+      - invoice-intake/frontend
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --allow-unauthenticated
+      - --service-account=cloud-run-sa@project-00c7b34c-acc0-4431-afb.iam.gserviceaccount.com
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+options:
+  logging: CLOUD_LOGGING_ONLY
