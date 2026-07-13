@@ -33,13 +33,28 @@ body { margin: 0; font-family: 'Segoe UI', system-ui, sans-serif; background: va
 
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
 .card section { margin-bottom: 22px; }
-.card h3 { margin: 0 0 12px; font-size: 15px; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }
+.card h3 { margin: 0; font-size: 15px; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }
 
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.id-preview { font-size: 12px; color: var(--muted); }
+.id-preview code { color: var(--good); }
+
+.error-summary { background: rgba(229,86,75,.1); border: 1px solid var(--bad); border-radius: 10px; padding: 12px 14px; margin-bottom: 18px; font-size: 13px; color: #ffc9c4; }
+.error-summary ul { margin: 8px 0 0; padding-left: 18px; }
+.error-summary li { margin: 2px 0; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
 .field { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 5px; }
+.field-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text); font-weight: 600; }
+.field-label .req { color: var(--bad); font-style: normal; margin-left: -3px; }
+.field-unit { font-size: 10px; color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 0 5px; font-weight: 500; }
+.mini-badge { font-size: 9px; text-transform: uppercase; letter-spacing: .05em; padding: 1px 6px; border-radius: 10px; }
+.mini-badge.auto { background: rgba(91,140,255,.2); color: #b7cbff; }
+.mini-badge.manual { background: rgba(224,163,37,.2); color: #ffdd9e; }
 .field input, select { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; color: var(--text); font-size: 14px; }
 .field input:focus, select:focus { outline: none; border-color: var(--accent); }
-.field.has-error input { border-color: var(--bad); }
+.field.has-error input, .field.has-error select { border-color: var(--bad); }
+.field .help { color: var(--muted); font-size: 11px; line-height: 1.35; }
 .field .err { color: #ffb0aa; font-style: normal; font-size: 11px; }
 
 .select-label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); margin-bottom: 16px; max-width: 340px; }

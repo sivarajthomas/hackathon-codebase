@@ -20,6 +20,7 @@ async function req(path, options = {}) {
 
 export const getTables = () => req('/tables')
 export const getNextId = (table) => req(`/tables/${table}/next-id`)
+export const getRows = (table, limit = 500) => req(`/tables/${table}/rows?limit=${limit}`)
 export const insertRow = (table, row, autoId = true) =>
   req(`/tables/${table}`, { method: 'POST', body: JSON.stringify({ row, auto_id: autoId }) })
 export const createInvoice = (shipment, invoice) =>
