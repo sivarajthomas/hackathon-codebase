@@ -1,6 +1,7 @@
-# Build + deploy the Invoice-Intake + Prevent backend to Cloud Run.
+# Build + deploy the Invoice-Intake backend to Cloud Run.
 #
-#   gcloud builds submit --config cloudbuild.yaml \
+# Run from the repository root (hackathon-codebase/):
+#   gcloud builds submit . --config invoice-intake/backend/cloudbuild.yaml \
 #     --substitutions=_REGION=us-central1,_SERVICE=invoice-intake-backend
 #
 # Set runtime config after deploy (or here via --set-env-vars):
@@ -14,9 +15,11 @@ steps:
   - name: gcr.io/cloud-builders/docker
     args:
       - build
+      - -f
+      - invoice-intake/backend/Dockerfile
       - -t
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
-      - .
+      - invoice-intake/backend
   - name: gcr.io/cloud-builders/docker
     args:
       - push
