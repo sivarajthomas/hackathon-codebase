@@ -94,10 +94,30 @@ class GCPClients:
     async def read_analyzed_data(
         self, analyzed_data_ref: Optional[str], scope: UserContext
     ) -> list[dict[str, Any]]:
-        """POC: read pre-analyzed rows from the BigQuery analyzed-data table."""
-        # TODO(placeholder): query
-        #   `{gcp_project_id}.{bigquery_dataset}.{bigquery_analyzed_table}`
-        #   filtered by `analyzed_data_ref` and the caller's scope.
+        """Read pre-analyzed rows from the BigQuery analyzed-data table.
+
+        Reads the real row(s) staged by the intake producer (keyed by
+        ``InvoiceNumber == analyzed_data_ref``) so the Prevent analysis reasons
+        over actual leakage data. Falls back to a placeholder row only in
+        dev/local (BigQuery not configured).
+        """
+        if self._bq_configured() and analyzed_data_ref:
+            from google.cloud import bigquery
+
+            sql = (
+                f"SELECT * FROM {self._table_fqn(self.settings.bigquery_analyzed_table)} "
+                "WHERE InvoiceNumber = @ref LIMIT 50"
+            )
+            try:
+                rows = await self._bq_query(
+                    sql, [bigquery.ScalarQueryParameter("ref", "STRING", str(analyzed_data_ref))]
+                )
+            except Exception as exc:  # noqa: BLE001 - best effort read
+                logger.warning("read_analyzed_data query failed for %s: %s", analyzed_data_ref, exc)
+                rows = []
+            return rows
+
+        # dev/local fallback (BigQuery not configured).
         return [
             {
                 "ref": analyzed_data_ref,
@@ -111,9 +131,71 @@ class GCPClients:
     # findings-store writes / listing / flag updates
     # ------------------------------------------------------------------ #
     async def write_finding(self, finding: PreventFinding) -> None:
-        """Insert a Prevent finding into the BigQuery findings store."""
-        # TODO(placeholder): streaming insert / load job into the findings table.
+        """Insert a Prevent finding into the BigQuery findings store.
+
+        Keeps an in-memory copy (used by ``load_finding_context`` Path A and the
+        dev/POC fallback) and, when BigQuery is configured, also persists the row
+        to the ``findings_store`` table so it surfaces in the CS "flagged" queue.
+        The leakage fields (amount/type/severity/ids) are read from the staged
+        ``analyzed_data`` row so the queue shows the real numbers.
+        """
+        # In-memory POC copy (also the fallback when BigQuery is not configured).
         self._findings[finding.finding_id] = finding
+        if not self._bq_configured():
+            return
+
+        from google.cloud import bigquery
+
+        analyzed = await self._read_analyzed_row(finding.source_ref or finding.invoice_number)
+        output = finding.output or {}
+        recommendations = output.get("recommendations") or []
+        recommendation = recommendations[0] if recommendations else None
+
+        sql = (
+            f"INSERT INTO {self._findings_fqn()} "
+            "(FindingID, InvoiceNumber, ShipmentID, ContractNumber, LeakageType, "
+            "LeakageAmount, RootCause, Recommendation, Severity, Status, Processed, "
+            "CreatedAt) VALUES (@fid, @inv, @ship, @contract, @ltype, @amount, "
+            "@root, @rec, @sev, @status, @processed, @created)"
+        )
+        params = [
+            bigquery.ScalarQueryParameter("fid", "STRING", finding.finding_id),
+            bigquery.ScalarQueryParameter("inv", "STRING", finding.invoice_number),
+            bigquery.ScalarQueryParameter("ship", "STRING", analyzed.get("ShipmentID")),
+            bigquery.ScalarQueryParameter("contract", "STRING", analyzed.get("ContractNumber")),
+            bigquery.ScalarQueryParameter(
+                "ltype", "STRING", analyzed.get("LeakageType") or output.get("root_cause")
+            ),
+            bigquery.ScalarQueryParameter("amount", "FLOAT64", self._to_float(analyzed.get("LeakageAmount"))),
+            bigquery.ScalarQueryParameter("root", "STRING", output.get("root_cause")),
+            bigquery.ScalarQueryParameter("rec", "STRING", recommendation),
+            bigquery.ScalarQueryParameter("sev", "STRING", str(analyzed.get("Severity") or "low")),
+            bigquery.ScalarQueryParameter("status", "STRING", finding.status.value.upper()),
+            bigquery.ScalarQueryParameter("processed", "BOOL", bool(finding.processed)),
+            bigquery.ScalarQueryParameter("created", "TIMESTAMP", finding.created_at),
+        ]
+        try:
+            await self._bq_query(sql, params)
+        except Exception as exc:  # noqa: BLE001 - never break the Pub/Sub handler on a write error
+            logger.warning("write_finding BigQuery insert failed: %s", exc)
+
+    async def _read_analyzed_row(self, ref: Optional[str]) -> dict[str, Any]:
+        """Read the staged analyzed-data row for a finding (leakage details)."""
+        if not ref or not self._bq_configured():
+            return {}
+        from google.cloud import bigquery
+
+        sql = (
+            "SELECT ShipmentID, ContractNumber, LeakageType, LeakageAmount, Severity "
+            f"FROM {self._table_fqn(self.settings.bigquery_analyzed_table)} "
+            "WHERE InvoiceNumber = @ref LIMIT 1"
+        )
+        try:
+            rows = await self._bq_query(sql, [bigquery.ScalarQueryParameter("ref", "STRING", str(ref))])
+        except Exception as exc:  # noqa: BLE001 - best effort enrichment
+            logger.warning("analyzed-data lookup failed for %s: %s", ref, exc)
+            return {}
+        return rows[0] if rows else {}
 
     async def list_recent_findings(
         self,

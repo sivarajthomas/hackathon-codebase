@@ -9,6 +9,7 @@ which flips the ``processed`` flag and updates the record in the findings store.
 
 from __future__ import annotations
 
+import json
 import uuid
 
 from .config import Settings
@@ -57,14 +58,30 @@ class PreventAgent:
         return finding
 
     async def _analyze(self, payload: PreventPayload, analyzed: list[dict]) -> PreventOutput:
-        # TODO(placeholder): call settings.analysis_model_id (Gemini) with the
-        #   analyzed rows and request structured output matching PreventOutput.
-        _ = await invoke_llm(
+        # Ask Gemini for structured JSON (root_cause + preventive recommendations)
+        # over the analyzed rows. Falls back to placeholders when the model is
+        # not configured or returns nothing usable, so the pipeline never breaks.
+        result = await invoke_llm(
             self.settings,
             model_id=self.settings.analysis_model_id,
             system=analysis_system(Verb.PREVENT),
-            messages=[{"role": "user", "content": str(analyzed)}],
+            messages=[{"role": "user", "content": json.dumps(analyzed, default=str)}],
+            response_schema={"type": "object"},
         )
+        structured = result.get("structured") or {}
+
+        root_cause = structured.get("root_cause")
+        if not isinstance(root_cause, str) or not root_cause.strip():
+            root_cause = "[PLACEHOLDER] Root cause inferred from the analyzed data."
+
+        raw_recs = structured.get("recommendations")
+        recommendations = (
+            [str(r).strip() for r in raw_recs if str(r).strip()]
+            if isinstance(raw_recs, list)
+            else []
+        )
+        if not recommendations:
+            recommendations = ["[PLACEHOLDER] Preventive control to stop the recurrence."]
 
         citations = [
             Citation(
@@ -81,7 +98,7 @@ class PreventAgent:
             for row, cit in zip(analyzed, citations)
         ]
         return PreventOutput(
-            root_cause="[PLACEHOLDER] Root cause inferred from the analyzed data.",
-            recommendations=["[PLACEHOLDER] Preventive control to stop the recurrence."],
+            root_cause=root_cause,
+            recommendations=recommendations,
             evidence=evidence,
         )
