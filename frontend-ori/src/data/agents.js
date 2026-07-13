@@ -23,9 +23,9 @@ export const agents = [
       { label: 'Avg. Response', value: 1.2, suffix: 's' },
     ],
     prompts: [
-      'Explain charges on invoice INV-48213',
-      'Why was a fuel surcharge applied?',
-      'Break down the DIM weight calculation',
+      'Break down every charge on invoice INV0001',
+      'Why is the fuel surcharge on INV0004 so high?',
+      'How was the 2250 kg billable weight for SHP0001 calculated?',
     ],
   },
   {
@@ -50,9 +50,9 @@ export const agents = [
       { label: 'Avg. Resolution', value: 2.1, suffix: 'd' },
     ],
     prompts: [
-      'Investigate dispute for INV-2210',
-      'Validate claim CLM-8842 against rate card',
-      'Show resolution history for account 5530',
+      'Investigate the duplicate fuel surcharge dispute DSP-0001 on INV0004',
+      'Should the missing contracted discount on INV0011 be credited?',
+      'Validate the weight dispute on INV0018 against the shipment record',
     ],
   },
   {
@@ -77,9 +77,9 @@ export const agents = [
       { label: 'Avg. Quote Time', value: 0.4, suffix: 's' },
     ],
     prompts: [
-      'What if I change weight from 10kg to 8kg?',
-      'Compare Ground vs 2-Day Air for this shipment',
-      'Recalculate with a different service level',
+      'What if SHP0005 shipped by Roadways instead of Airways?',
+      'Recalculate INV0001 with insurance at the contracted 1.5% of value',
+      'Compare Chennai\u2192Delhi freight cost across Air, Road and Ship',
     ],
   },
   {
@@ -104,9 +104,9 @@ export const agents = [
       { label: 'Pre-Issue Catch Rate', value: 91.4, suffix: '%' },
     ],
     prompts: [
-      'Scan this billing batch for anomalies',
-      'Flag at-risk invoices for account 7741',
-      'Validate charges before next billing cycle',
+      'Show the highest-value leakage findings still open',
+      'Why was INV0002 flagged for surcharge not billed?',
+      'Which contracts have the most insurance underbilling?',
     ],
     // Invoices flagged with potential billing issues — shown in a right sidebar
     // on the Prevent Agent workspace.
